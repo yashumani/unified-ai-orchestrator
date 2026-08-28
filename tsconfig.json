@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./services/evidence-index"
+    },
+    {
+      "path": "./services/session-ingestion"
+    }
+  ]
+}
