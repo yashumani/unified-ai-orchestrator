@@ -266,6 +266,16 @@ export const RepositoryToolNameSchema = z.enum([
   "repository.run_npm_script"
 ]);
 
+export const RequestedToolNameSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), {
+    message: "tool name cannot contain control characters"
+  });
+
+export const MALFORMED_TOOL_CALL_NAME = "malformed.tool_call" as const;
+
 export const RepositoryToolModeSchema = z.enum(["read", "write"]);
 
 export const ToolDefinitionSchema = z
@@ -280,8 +290,8 @@ export const ToolDefinitionSchema = z
 export const ToolCallSchema = z
   .object({
     callId: z.string().min(1).max(256),
-    toolName: RepositoryToolNameSchema,
-    arguments: z.record(z.string(), z.unknown())
+    toolName: RequestedToolNameSchema,
+    arguments: z.unknown()
   })
   .strict();
 
@@ -322,7 +332,7 @@ export const PolicyDecisionSchema = z
 export const ToolResultSchema = z
   .object({
     callId: z.string().min(1).max(256),
-    toolName: RepositoryToolNameSchema,
+    toolName: RequestedToolNameSchema,
     ok: z.boolean(),
     summary: z.string().min(1),
     data: z.unknown().optional(),
@@ -340,12 +350,41 @@ export const AgentRunStatusSchema = z.enum([
   "cancelled"
 ]);
 
+export const AgentConversationMessageSchema = z
+  .object({
+    messageId: StableIdSchema,
+    role: z.enum(["user", "assistant"]),
+    content: z.string().min(1).max(100_000)
+  })
+  .strict();
+
 export const AgentRunRequestSchema = z
   .object({
     runId: StableIdSchema.optional(),
-    message: z.string().min(1).max(100_000)
+    threadId: StableIdSchema.optional(),
+    message: z.string().min(1).max(100_000).optional(),
+    messages: z.array(AgentConversationMessageSchema).min(1).max(50).optional()
   })
-  .strict();
+  .strict()
+  .superRefine((request, context) => {
+    if ((request.message === undefined) === (request.messages === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "provide exactly one of message or messages",
+        path: ["message"]
+      });
+    }
+    if (
+      request.messages !== undefined &&
+      request.messages.at(-1)?.role !== "user"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "the final conversation message must be from the user",
+        path: ["messages"]
+      });
+    }
+  });
 
 export const AgentEventTypeSchema = z.enum([
   "run_started",
@@ -373,25 +412,77 @@ export const AgentRunEventSchema = z
 export const AgentToolReceiptSchema = z
   .object({
     callId: z.string().min(1).max(256),
-    toolName: RepositoryToolNameSchema,
+    toolName: RequestedToolNameSchema,
+    argumentsObjectSha256: Sha256Schema,
     policyCode: PolicyErrorCodeSchema,
+    policyReason: z.string().min(1).max(2_000),
+    policyCheckedAt: UtcTimestampSchema,
     outcome: z.enum(["succeeded", "failed", "blocked"]),
-    resultObjectSha256: Sha256Schema.optional()
+    resultObjectSha256: Sha256Schema.optional(),
+    resultPayloadSha256: Sha256Schema.optional(),
+    summary: z.string().min(1).max(2_000)
   })
   .strict();
+
+export const AgentRuntimeConfigurationSchema = z
+  .object({
+    contextSize: z.literal(4096),
+    temperature: z.literal(0.2),
+    thinking: z.literal(false)
+  })
+  .strict();
+
+export const AgentWorkspaceEvidenceSchema = z
+  .object({
+    repositoryRootSha256: Sha256Schema,
+    originSha256: Sha256Schema,
+    branch: z.string().min(1).max(500),
+    trustGrantSha256: Sha256Schema.optional()
+  })
+  .strict();
+
+export const AgentUsageSchema = z
+  .object({
+    available: z.boolean(),
+    totalDuration: z.number().int().nonnegative().optional(),
+    loadDuration: z.number().int().nonnegative().optional(),
+    promptEvalCount: z.number().int().nonnegative().optional(),
+    promptEvalDuration: z.number().int().nonnegative().optional(),
+    evalCount: z.number().int().nonnegative().optional(),
+    evalDuration: z.number().int().nonnegative().optional()
+  })
+  .strict()
+  .superRefine((usage, context) => {
+    const counterCount = Object.keys(usage).filter(
+      (key) => key !== "available"
+    ).length;
+    if (usage.available !== (counterCount > 0)) {
+      context.addIssue({
+        code: "custom",
+        message: "available must indicate whether Ollama usage counters were reported",
+        path: ["available"]
+      });
+    }
+  });
 
 export const AgentRunReceiptSchema = z
   .object({
     schemaVersion: z.literal(SCHEMA_VERSION),
     runId: StableIdSchema,
+    threadId: StableIdSchema,
+    messageIds: z.array(StableIdSchema).min(1).max(50),
     status: AgentRunStatusSchema.exclude(["queued", "running"]),
     model: z.literal(PINNED_OLLAMA_MODEL),
+    runtime: AgentRuntimeConfigurationSchema,
+    toolSchemaObjectSha256: Sha256Schema,
+    workspace: AgentWorkspaceEvidenceSchema,
     startedAt: UtcTimestampSchema,
     completedAt: UtcTimestampSchema,
     iterations: z.number().int().nonnegative().max(8),
     toolCalls: z.array(AgentToolReceiptSchema).max(12),
     inputObjectSha256: Sha256Schema,
     outputObjectSha256: Sha256Schema.optional(),
+    usage: AgentUsageSchema.default({ available: false }),
     warnings: z.array(z.string().min(1)).default([])
   })
   .strict()
@@ -416,8 +507,8 @@ export const OllamaToolCallSchema = z
   .object({
     function: z
       .object({
-        name: RepositoryToolNameSchema,
-        arguments: z.record(z.string(), z.unknown())
+        name: RequestedToolNameSchema,
+        arguments: z.unknown().optional()
       })
       .strict()
   })
@@ -429,7 +520,7 @@ export const OllamaMessageSchema = z
     content: z.string(),
     thinking: z.string().optional(),
     tool_calls: z.array(OllamaToolCallSchema).optional(),
-    tool_name: RepositoryToolNameSchema.optional()
+    tool_name: RequestedToolNameSchema.optional()
   })
   .strict();
 
@@ -495,17 +586,28 @@ export type WorkspaceIdentity = z.infer<typeof WorkspaceIdentitySchema>;
 export type TrustGrant = z.infer<typeof TrustGrantSchema>;
 export type TrustState = z.infer<typeof TrustStateSchema>;
 export type RepositoryToolName = z.infer<typeof RepositoryToolNameSchema>;
+export type RequestedToolName = z.infer<typeof RequestedToolNameSchema>;
 export type RepositoryToolMode = z.infer<typeof RepositoryToolModeSchema>;
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
 export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type PolicyErrorCode = z.infer<typeof PolicyErrorCodeSchema>;
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
+export type AgentConversationMessage = z.infer<
+  typeof AgentConversationMessageSchema
+>;
 export type AgentRunStatus = z.infer<typeof AgentRunStatusSchema>;
 export type AgentRunRequest = z.infer<typeof AgentRunRequestSchema>;
 export type AgentEventType = z.infer<typeof AgentEventTypeSchema>;
 export type AgentRunEvent = z.infer<typeof AgentRunEventSchema>;
 export type AgentToolReceipt = z.infer<typeof AgentToolReceiptSchema>;
+export type AgentRuntimeConfiguration = z.infer<
+  typeof AgentRuntimeConfigurationSchema
+>;
+export type AgentWorkspaceEvidence = z.infer<
+  typeof AgentWorkspaceEvidenceSchema
+>;
+export type AgentUsage = z.infer<typeof AgentUsageSchema>;
 export type AgentRunReceipt = z.infer<typeof AgentRunReceiptSchema>;
 export type OllamaRole = z.infer<typeof OllamaRoleSchema>;
 export type OllamaToolCall = z.infer<typeof OllamaToolCallSchema>;

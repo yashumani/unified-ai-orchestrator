@@ -27,6 +27,12 @@
     },
     {
       "path": "./services/session-ingestion"
+    },
+    {
+      "path": "./apps/api"
+    },
+    {
+      "path": "./apps/web"
     }
   ]
 }

@@ -155,6 +155,31 @@ describe("per-mutation revalidation", () => {
     expect(authorization.grant).not.toBeNull();
   });
 
+  it("authorizes the fixed verifier at the repository root without treating package metadata as a mutation target", async () => {
+    const { engine, repositoryRoot } = await makeEngine();
+    await engine.grantWorkspaceTrust();
+
+    await expect(
+      engine.evaluateMutation({ toolName: "repository.run_npm_script" })
+    ).resolves.toMatchObject({
+      decision: {
+        allowed: true,
+        code: "allowed",
+        reason: expect.stringContaining("Fixed repository verification")
+      },
+      resolvedPath: repositoryRoot
+    });
+    await expect(
+      engine.evaluateMutation({
+        toolName: "repository.run_npm_script",
+        repositoryRelativePath: "package.json"
+      })
+    ).resolves.toMatchObject({
+      decision: { allowed: false, code: "invalid_input" },
+      resolvedPath: null
+    });
+  });
+
   it("rejects an unknown or read-only tool as a mutation", async () => {
     const { engine } = await makeEngine();
     await engine.grantWorkspaceTrust();

@@ -75,6 +75,11 @@ export class RuntimeManager {
   readonly #pollIntervalMs: number;
   readonly #wait: (milliseconds: number) => Promise<void>;
   #startPromise: Promise<RuntimeStatus> | undefined;
+  readonly #activeServiceStarts = new Set<"ollama" | "whiteshadow">();
+  readonly #serviceStartOutcomes = new Map<
+    "ollama" | "whiteshadow",
+    RuntimeServiceState
+  >();
 
   constructor(options: RuntimeManagerOptions) {
     this.#ollama = options.ollama;
@@ -98,6 +103,15 @@ export class RuntimeManager {
   }
 
   async status(): Promise<RuntimeStatus> {
+    const status = await this.#rawStatus();
+    return RuntimeStatusSchema.parse({
+      ...status,
+      ollama: this.#reportedState("ollama", status.ollama),
+      whiteshadow: this.#reportedState("whiteshadow", status.whiteshadow)
+    });
+  }
+
+  async #rawStatus(): Promise<RuntimeStatus> {
     const [ollama, whiteshadow] = await Promise.all([
       this.#probeOllama(),
       this.#probeWhiteShadow()
@@ -110,14 +124,23 @@ export class RuntimeManager {
   }
 
   start(): Promise<RuntimeStatus> {
-    this.#startPromise ??= this.#startServices().finally(() => {
-      this.#startPromise = undefined;
+    if (this.#startPromise !== undefined) {
+      return this.#startPromise;
+    }
+    const pending = this.#startServices();
+    const tracked = pending.finally(() => {
+      if (this.#startPromise === tracked) {
+        this.#startPromise = undefined;
+        this.#activeServiceStarts.clear();
+        this.#serviceStartOutcomes.clear();
+      }
     });
-    return this.#startPromise;
+    this.#startPromise = tracked;
+    return tracked;
   }
 
   async #startServices(): Promise<RuntimeStatus> {
-    const initial = await this.status();
+    const initial = await this.#rawStatus();
     const [ollama, whiteshadow] = await Promise.all([
       this.#startOllama(initial.ollama),
       this.#startWhiteShadow(initial.whiteshadow)
@@ -129,6 +152,27 @@ export class RuntimeManager {
     });
   }
 
+  #reportedState(
+    service: "ollama" | "whiteshadow",
+    state: RuntimeServiceState
+  ): RuntimeServiceState {
+    if (state.phase !== "offline") {
+      return state;
+    }
+    const outcome = this.#serviceStartOutcomes.get(service);
+    if (outcome !== undefined) {
+      return outcome;
+    }
+    if (!this.#activeServiceStarts.has(service)) {
+      return state;
+    }
+    return transitioned(
+      state,
+      "starting",
+      `Explicit startup is in progress. Latest probe: ${state.detail}`
+    );
+  }
+
   async #startOllama(initial: RuntimeServiceState): Promise<RuntimeServiceState> {
     if (initial.phase === "starting") {
       return this.#poll(() => this.#probeOllama(), "ollama");
@@ -136,20 +180,28 @@ export class RuntimeManager {
     if (initial.phase !== "offline") {
       return initial;
     }
+    this.#activeServiceStarts.add("ollama");
+    this.#serviceStartOutcomes.delete("ollama");
+    let result: RuntimeServiceState;
     try {
       await this.#launcher.launch(this.#ollamaLaunch);
     } catch (error) {
-      return transitioned(
+      result = transitioned(
         initial,
         "blocked",
         error instanceof Error
           ? `Ollama could not be started: ${error.message}`
           : "Ollama could not be started."
       );
+      this.#activeServiceStarts.delete("ollama");
+      this.#serviceStartOutcomes.set("ollama", result);
+      return result;
     }
 
-    const ready = await this.#poll(() => this.#probeOllama(), "ollama");
-    return ready;
+    result = await this.#poll(() => this.#probeOllama(), "ollama");
+    this.#activeServiceStarts.delete("ollama");
+    this.#serviceStartOutcomes.set("ollama", result);
+    return result;
   }
 
   async #startWhiteShadow(initial: RuntimeServiceState): Promise<RuntimeServiceState> {
@@ -159,19 +211,28 @@ export class RuntimeManager {
     if (initial.phase !== "offline") {
       return initial;
     }
+    this.#activeServiceStarts.add("whiteshadow");
+    this.#serviceStartOutcomes.delete("whiteshadow");
+    let result: RuntimeServiceState;
     try {
       await this.#launcher.launch(this.#whiteshadowLaunch);
     } catch (error) {
-      return transitioned(
+      result = transitioned(
         initial,
         "degraded",
         error instanceof Error
           ? `WhiteShadow could not be started: ${error.message}`
           : "WhiteShadow could not be started."
       );
+      this.#activeServiceStarts.delete("whiteshadow");
+      this.#serviceStartOutcomes.set("whiteshadow", result);
+      return result;
     }
     const state = await this.#poll(() => this.#probeWhiteShadow(), "whiteshadow");
-    return state.phase === "blocked" ? transitioned(state, "degraded", state.detail) : state;
+    result = state.phase === "blocked" ? transitioned(state, "degraded", state.detail) : state;
+    this.#activeServiceStarts.delete("whiteshadow");
+    this.#serviceStartOutcomes.set("whiteshadow", result);
+    return result;
   }
 
   async #poll(

@@ -1,8 +1,11 @@
 import {
+  MALFORMED_TOOL_CALL_NAME,
   OllamaChatChunkSchema,
   PINNED_OLLAMA_MODEL,
+  RequestedToolNameSchema,
   type OllamaMessage,
-  type RepositoryToolName
+  type RepositoryToolName,
+  type RequestedToolName
 } from "@unified-ai/contracts";
 
 import { OllamaClientError, invalidResponse } from "./errors.js";
@@ -12,12 +15,15 @@ export { PINNED_OLLAMA_MODEL };
 
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 export const DEFAULT_OLLAMA_KEEP_ALIVE = "5m";
-export const DEFAULT_OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_OLLAMA_REQUEST_TIMEOUT_MS = 120_000;
 export const OLLAMA_CONTEXT_SIZE = 4096;
 export const OLLAMA_TEMPERATURE = 0.2;
+export const OLLAMA_TOOL_PLANNER_TEMPERATURE = 0;
+export const OLLAMA_TOOL_PLANNER_MAX_TOKENS = 256;
 
 const MAX_REQUEST_TIMEOUT_MS = 300_000;
 const MAX_KEEP_ALIVE_MILLISECONDS = 3_600_000;
+const STRUCTURED_RESPONSE_DELTA_CHARACTERS = 80;
 
 export type OllamaFetch = (
   input: string | URL | Request,
@@ -63,8 +69,8 @@ export interface OllamaChatRequest {
 }
 
 export interface NormalizedOllamaToolCall {
-  readonly name: RepositoryToolName;
-  readonly arguments: Record<string, unknown>;
+  readonly name: RequestedToolName;
+  readonly arguments: unknown;
 }
 
 export interface OllamaCompletionMetadata {
@@ -100,6 +106,23 @@ interface RequestScope {
 
 interface UnknownRecord {
   readonly [key: string]: unknown;
+}
+
+interface StructuredToolCallPlan {
+  readonly kind: "tool_call";
+  readonly tool: OllamaToolDefinition;
+}
+
+interface StructuredResponsePlan {
+  readonly kind: "response";
+  readonly response: string;
+}
+
+type StructuredToolPlan = StructuredToolCallPlan | StructuredResponsePlan;
+
+interface StructuredChatResult {
+  readonly content: string;
+  readonly metadata: OllamaCompletionMetadata;
 }
 
 function configurationError(message: string): OllamaClientError {
@@ -261,6 +284,303 @@ function asRecord(value: unknown): UnknownRecord | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as UnknownRecord)
     : undefined;
+}
+
+function structuredToolPlanFormat(
+  tools: readonly OllamaToolDefinition[]
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      decision: { type: "string", enum: ["call_tool", "respond"] },
+      toolName: {
+        type: "string",
+        enum: [...tools.map((tool) => tool.function.name), "none"]
+      },
+      response: { type: "string" }
+    },
+    required: ["decision", "toolName", "response"],
+    additionalProperties: false
+  };
+}
+
+function withSystemInstruction(
+  messages: readonly OllamaMessage[],
+  instruction: string
+): OllamaMessage[] {
+  let extendedSystem = false;
+  const extended = messages.map((message) => {
+    if (!extendedSystem && message.role === "system") {
+      extendedSystem = true;
+      return {
+        ...message,
+        content: `${message.content}\n\n${instruction}`
+      } satisfies OllamaMessage;
+    }
+    return { ...message };
+  });
+  if (!extendedSystem) {
+    extended.unshift({ role: "system", content: instruction });
+  }
+  return extended;
+}
+
+function structuredPlannerMessages(
+  messages: readonly OllamaMessage[],
+  tools: readonly OllamaToolDefinition[],
+  format: Record<string, unknown>
+): OllamaMessage[] {
+  const instruction = [
+    "Choose exactly one next action for the repository assistant.",
+    "Use call_tool when an offered tool is required. Tool execution is serial, so select only the single next tool.",
+    "Use respond only when the existing conversation and authoritative tool results are sufficient to answer.",
+    "Never invent or predict a tool result. A response attached to call_tool is ignored.",
+    "Never repeat an identical tool call after an invalid_input or policy rejection. Correct it from the schema or respond with the failure.",
+    "For call_tool, set toolName to one offered name. Arguments are requested separately under that tool's schema.",
+    "For respond, set toolName to none and response to the grounded final answer.",
+    `Offered tools: ${JSON.stringify(
+      tools.map((tool) => ({
+        name: tool.function.name,
+        description: tool.function.description
+      }))
+    )}`,
+    `Required response schema: ${JSON.stringify(format)}`
+  ].join("\n");
+  return withSystemInstruction(messages, instruction);
+}
+
+function parseStructuredToolPlan(
+  content: string,
+  tools: readonly OllamaToolDefinition[]
+): StructuredToolPlan {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    throw invalidResponse("Ollama returned invalid structured tool-plan JSON.");
+  }
+  const plan = asRecord(raw);
+  const decision = plan?.["decision"];
+  const toolName = plan?.["toolName"];
+  const response = plan?.["response"];
+  if (
+    plan === undefined ||
+    typeof toolName !== "string" ||
+    typeof response !== "string"
+  ) {
+    throw invalidResponse("Ollama returned an invalid structured tool plan.");
+  }
+
+  if (decision === "call_tool") {
+    const selectedTool = tools.find(
+      (tool) => tool.function.name === toolName
+    );
+    if (selectedTool === undefined) {
+      throw invalidResponse("Ollama selected a tool outside the offered catalog.");
+    }
+    return { kind: "tool_call", tool: selectedTool };
+  }
+
+  if (
+    decision !== "respond" ||
+    toolName !== "none" ||
+    response.trim().length === 0
+  ) {
+    throw invalidResponse("Ollama returned an inconsistent structured tool plan.");
+  }
+  return { kind: "response", response };
+}
+
+function grammarSafeSchema(value: unknown, depth = 0): Record<string, unknown> {
+  if (depth > 8) {
+    throw configurationError("An offered tool schema exceeds the supported depth.");
+  }
+  const source = asRecord(value);
+  const type = source?.["type"];
+  if (source === undefined || typeof type !== "string") {
+    throw configurationError("An offered tool has an invalid input schema.");
+  }
+  if (type === "object") {
+    const rawProperties = asRecord(source["properties"]) ?? {};
+    const properties = Object.fromEntries(
+      Object.entries(rawProperties).map(([key, schema]) => [
+        key,
+        grammarSafeSchema(schema, depth + 1)
+      ])
+    );
+    const required = Array.isArray(source["required"])
+      ? source["required"].filter(
+          (item): item is string =>
+            typeof item === "string" && Object.hasOwn(properties, item)
+        )
+      : [];
+    return {
+      type: "object",
+      properties,
+      ...(required.length === 0 ? {} : { required }),
+      additionalProperties: false
+    };
+  }
+  if (type === "array") {
+    return {
+      type: "array",
+      items: grammarSafeSchema(source["items"], depth + 1)
+    };
+  }
+  if (!["string", "integer", "number", "boolean"].includes(type)) {
+    throw configurationError("An offered tool uses an unsupported schema type.");
+  }
+  const enumValues = source["enum"];
+  const minimum = source["minimum"];
+  const maximum = source["maximum"];
+  return {
+    type,
+    ...(Array.isArray(enumValues) && enumValues.length > 0
+      ? { enum: enumValues }
+      : {}),
+    ...((type === "integer" || type === "number") &&
+    typeof minimum === "number" &&
+    Number.isFinite(minimum)
+      ? { minimum }
+      : {}),
+    ...((type === "integer" || type === "number") &&
+    typeof maximum === "number" &&
+    Number.isFinite(maximum)
+      ? { maximum }
+      : {})
+  };
+}
+
+function structuredArgumentMessages(
+  messages: readonly OllamaMessage[],
+  tool: OllamaToolDefinition,
+  format: Record<string, unknown>
+): OllamaMessage[] {
+  const instruction = [
+    `Generate arguments for the selected tool ${tool.function.name}.`,
+    `Tool description: ${tool.function.description}`,
+    "Return only the JSON arguments object. Do not include the tool name, a result, commentary, or markdown.",
+    "Omit optional fields unless the user explicitly requests them. Never invent an optional value.",
+    "Use only values supported by the conversation. The repository policy validates the result again before execution.",
+    `Grammar-enforced arguments schema: ${JSON.stringify(format)}`,
+    `Full repository validation schema: ${JSON.stringify(tool.function.parameters)}`
+  ].join("\n");
+  return withSystemInstruction(messages, instruction);
+}
+
+function parseStructuredArguments(content: string): Record<string, unknown> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    throw invalidResponse("Ollama returned invalid structured tool arguments.");
+  }
+  const argumentsRecord = asRecord(raw);
+  if (argumentsRecord === undefined) {
+    throw invalidResponse("Ollama returned non-object tool arguments.");
+  }
+  return argumentsRecord;
+}
+
+function addOptionalMetadata(
+  first: number | undefined,
+  second: number | undefined
+): number | undefined {
+  return first === undefined && second === undefined
+    ? undefined
+    : (first ?? 0) + (second ?? 0);
+}
+
+function combineCompletionMetadata(
+  first: OllamaCompletionMetadata,
+  second: OllamaCompletionMetadata
+): OllamaCompletionMetadata {
+  const totalDuration = addOptionalMetadata(
+    first.totalDuration,
+    second.totalDuration
+  );
+  const loadDuration = addOptionalMetadata(first.loadDuration, second.loadDuration);
+  const promptEvalCount = addOptionalMetadata(
+    first.promptEvalCount,
+    second.promptEvalCount
+  );
+  const promptEvalDuration = addOptionalMetadata(
+    first.promptEvalDuration,
+    second.promptEvalDuration
+  );
+  const evalCount = addOptionalMetadata(first.evalCount, second.evalCount);
+  const evalDuration = addOptionalMetadata(
+    first.evalDuration,
+    second.evalDuration
+  );
+  return {
+    model: PINNED_OLLAMA_MODEL,
+    createdAt: second.createdAt,
+    ...(second.doneReason === undefined ? {} : { doneReason: second.doneReason }),
+    ...(totalDuration === undefined ? {} : { totalDuration }),
+    ...(loadDuration === undefined ? {} : { loadDuration }),
+    ...(promptEvalCount === undefined ? {} : { promptEvalCount }),
+    ...(promptEvalDuration === undefined ? {} : { promptEvalDuration }),
+    ...(evalCount === undefined ? {} : { evalCount }),
+    ...(evalDuration === undefined ? {} : { evalDuration })
+  };
+}
+
+function structuredResponseDeltas(value: string): string[] {
+  const characters = Array.from(value);
+  const deltas: string[] = [];
+  for (
+    let index = 0;
+    index < characters.length;
+    index += STRUCTURED_RESPONSE_DELTA_CHARACTERS
+  ) {
+    deltas.push(
+      characters
+        .slice(index, index + STRUCTURED_RESPONSE_DELTA_CHARACTERS)
+        .join("")
+    );
+  }
+  return deltas;
+}
+
+function normalizeInboundToolCall(value: unknown): {
+  function: { name: RequestedToolName; arguments: unknown };
+} {
+  const call = asRecord(value);
+  const functionRecord = asRecord(call?.["function"]);
+  const parsedName = RequestedToolNameSchema.safeParse(functionRecord?.["name"]);
+  if (!parsedName.success) {
+    return {
+      function: {
+        name: MALFORMED_TOOL_CALL_NAME,
+        arguments: { classification: "invalid_input", malformed: true }
+      }
+    };
+  }
+  return {
+    function: {
+      name: parsedName.data,
+      arguments: functionRecord?.["arguments"] ?? null
+    }
+  };
+}
+
+function normalizeInboundChatChunk(value: unknown): unknown {
+  const chunk = asRecord(value);
+  const message = asRecord(chunk?.["message"]);
+  if (chunk === undefined || message === undefined || !("tool_calls" in message)) {
+    return value;
+  }
+  const rawCalls = message["tool_calls"];
+  return {
+    ...chunk,
+    message: {
+      ...message,
+      tool_calls: Array.isArray(rawCalls)
+        ? rawCalls.map(normalizeInboundToolCall)
+        : [normalizeInboundToolCall(rawCalls)]
+    }
+  };
 }
 
 function optionalNonNegativeInteger(
@@ -430,7 +750,6 @@ export class OllamaClient {
     signal?: AbortSignal
   ): AsyncGenerator<OllamaStreamEvent> {
     const scope = createRequestScope(this.requestTimeoutMs, signal);
-    let completed = false;
 
     try {
       if (scope.callerAborted()) {
@@ -441,10 +760,59 @@ export class OllamaClient {
         );
       }
 
+      const offeredTools = request.tools ?? [];
+      if (offeredTools.length > 0) {
+        const planFormat = structuredToolPlanFormat(offeredTools);
+        const planned = await this.#collectStructuredChat(
+          structuredPlannerMessages(
+            request.messages,
+            offeredTools,
+            planFormat
+          ),
+          planFormat,
+          scope.signal
+        );
+        const plan = parseStructuredToolPlan(planned.content, offeredTools);
+        if (plan.kind === "response") {
+          for (const content of structuredResponseDeltas(plan.response)) {
+            yield { type: "content", content };
+          }
+          yield { type: "complete", metadata: planned.metadata };
+          return;
+        }
+
+        const argumentFormat = grammarSafeSchema(
+          plan.tool.function.parameters
+        );
+        const argumentResult = await this.#collectStructuredChat(
+          structuredArgumentMessages(
+            request.messages,
+            plan.tool,
+            argumentFormat
+          ),
+          argumentFormat,
+          scope.signal
+        );
+        yield {
+          type: "tool_call",
+          toolCall: {
+            name: plan.tool.function.name,
+            arguments: parseStructuredArguments(argumentResult.content)
+          }
+        };
+        yield {
+          type: "complete",
+          metadata: combineCompletionMetadata(
+            planned.metadata,
+            argumentResult.metadata
+          )
+        };
+        return;
+      }
+
       const body = JSON.stringify({
         model: PINNED_OLLAMA_MODEL,
         messages: request.messages,
-        ...(request.tools === undefined ? {} : { tools: request.tools }),
         stream: true,
         think: false,
         keep_alive: this.keepAlive,
@@ -464,13 +832,16 @@ export class OllamaClient {
         throw invalidResponse("Ollama returned an empty streaming response.");
       }
 
+      let completed = false;
       for await (const raw of parseNdjson(response.body)) {
         if (completed) {
           throw invalidResponse(
             "Ollama returned data after the completion record."
           );
         }
-        const parsed = OllamaChatChunkSchema.safeParse(raw);
+        const parsed = OllamaChatChunkSchema.safeParse(
+          normalizeInboundChatChunk(raw)
+        );
         if (!parsed.success) {
           throw invalidResponse("Ollama returned an invalid chat chunk.");
         }
@@ -497,7 +868,7 @@ export class OllamaClient {
             type: "tool_call",
             toolCall: {
               name: toolCall.function.name,
-              arguments: toolCall.function.arguments
+              arguments: toolCall.function.arguments ?? null
             }
           };
         }
@@ -526,6 +897,81 @@ export class OllamaClient {
     } finally {
       scope.close();
     }
+  }
+
+  async #collectStructuredChat(
+    messages: readonly OllamaMessage[],
+    format: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<StructuredChatResult> {
+    const response = await this.#fetch(`${this.baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: PINNED_OLLAMA_MODEL,
+        messages,
+        format,
+        stream: true,
+        think: false,
+        keep_alive: this.keepAlive,
+        options: {
+          num_ctx: OLLAMA_CONTEXT_SIZE,
+          temperature: OLLAMA_TOOL_PLANNER_TEMPERATURE,
+          num_predict: OLLAMA_TOOL_PLANNER_MAX_TOKENS
+        }
+      }),
+      signal
+    });
+    assertSuccessful(response);
+    if (response.body === null) {
+      throw invalidResponse("Ollama returned an empty structured stream.");
+    }
+
+    let completed = false;
+    let content = "";
+    let metadata: OllamaCompletionMetadata | undefined;
+    for await (const raw of parseNdjson(response.body)) {
+      if (completed) {
+        throw invalidResponse(
+          "Ollama returned data after the structured completion record."
+        );
+      }
+      const parsed = OllamaChatChunkSchema.safeParse(
+        normalizeInboundChatChunk(raw)
+      );
+      if (!parsed.success) {
+        throw invalidResponse("Ollama returned an invalid structured chat chunk.");
+      }
+      const chunk = parsed.data;
+      if (chunk.model !== PINNED_OLLAMA_MODEL) {
+        throw new OllamaClientError(
+          "model_mismatch",
+          "Ollama responded with a model other than the pinned model.",
+          { retryable: false }
+        );
+      }
+      if ((chunk.message.tool_calls?.length ?? 0) > 0) {
+        throw invalidResponse(
+          "Ollama mixed native tool calls into a structured response."
+        );
+      }
+      content += chunk.message.content;
+      if (chunk.done) {
+        completed = true;
+        metadata = completionMetadata(
+          raw,
+          chunk.model,
+          chunk.created_at,
+          chunk.done_reason
+        );
+      }
+    }
+    if (!completed || metadata === undefined) {
+      throw invalidResponse(
+        "Ollama ended the structured stream before completion metadata."
+      );
+    }
+    return { content, metadata };
   }
 
   async #withRequest<T>(

@@ -97,7 +97,7 @@ describe("OllamaClient probes", () => {
 });
 
 describe("OllamaClient streaming chat", () => {
-  it("sends the fixed safe request and normalizes streamed output", async () => {
+  it("sends the fixed safe text request and normalizes streamed output", async () => {
     let requestUrl = "";
     let requestMethod: string | undefined;
     let requestBody: unknown;
@@ -122,21 +122,7 @@ describe("OllamaClient streaming chat", () => {
 
     const events = await collectEvents(
       client.streamChat({
-        messages: [{ role: "user", content: "Inspect this repository" }],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "repository.read_file",
-              description: "Read a repository file",
-              parameters: {
-                type: "object",
-                properties: { path: { type: "string" } },
-                required: ["path"]
-              }
-            }
-          }
-        ]
+        messages: [{ role: "user", content: "Inspect this repository" }]
       })
     );
 
@@ -145,20 +131,6 @@ describe("OllamaClient streaming chat", () => {
     expect(requestBody).toEqual({
       model: "qwen3:4b",
       messages: [{ role: "user", content: "Inspect this repository" }],
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "repository.read_file",
-            description: "Read a repository file",
-            parameters: {
-              type: "object",
-              properties: { path: { type: "string" } },
-              required: ["path"]
-            }
-          }
-        }
-      ],
       stream: true,
       think: false,
       keep_alive: DEFAULT_OLLAMA_KEEP_ALIVE,
@@ -199,6 +171,265 @@ describe("OllamaClient streaming chat", () => {
     ]);
   });
 
+  it("uses a constrained streaming plan when tools are offered", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const untrustedResponse = "The repository is clean without checking.";
+    const plan = JSON.stringify({
+      decision: "call_tool",
+      toolName: "repository.git_status",
+      response: untrustedResponse
+    });
+    const fetchImpl: OllamaFetch = async (_input, init) => {
+      requestBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>
+      );
+      const content = requestBodies.length === 1 ? plan : "{}";
+      return new Response(
+        [
+          JSON.stringify({
+            model: "qwen3:4b",
+            created_at: "2026-08-28T10:00:00.000Z",
+            message: { role: "assistant", content: content.slice(0, 31) },
+            done: false
+          }),
+          JSON.stringify({
+            model: "qwen3:4b",
+            created_at: "2026-08-28T10:00:00.100Z",
+            message: { role: "assistant", content: content.slice(31) },
+            done: true,
+            done_reason: "stop",
+            prompt_eval_count: 115,
+            eval_count: 41
+          })
+        ].join("\n"),
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    };
+    const client = new OllamaClient({ fetch: fetchImpl });
+    const tools = [
+      {
+        type: "function" as const,
+        function: {
+          name: "repository.git_status" as const,
+          description: "Read repository status.",
+          parameters: { type: "object", properties: {}, additionalProperties: false }
+        }
+      }
+    ];
+
+    const events = await collectEvents(
+      client.streamChat({
+        messages: [
+          { role: "system", content: "Stay inside the repository." },
+          { role: "user", content: "Check status." }
+        ],
+        tools
+      })
+    );
+
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0]).not.toHaveProperty("tools");
+    expect(requestBodies[0]).toMatchObject({
+      model: "qwen3:4b",
+      stream: true,
+      think: false,
+      options: { num_ctx: 4096, temperature: 0, num_predict: 256 },
+      format: {
+        type: "object",
+        properties: {
+          decision: { enum: ["call_tool", "respond"] },
+          toolName: { enum: ["repository.git_status", "none"] }
+        }
+      }
+    });
+    expect(requestBodies[1]).toMatchObject({
+      format: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      }
+    });
+    expect(
+      (requestBodies[0]?.["messages"] as Array<{ content: string }>)[0]?.content
+    ).toContain("Offered tools:");
+    expect(events).toEqual([
+      {
+        type: "tool_call",
+        toolCall: { name: "repository.git_status", arguments: {} }
+      },
+      {
+        type: "complete",
+        metadata: {
+          model: "qwen3:4b",
+          createdAt: "2026-08-28T10:00:00.100Z",
+          doneReason: "stop",
+          promptEvalCount: 230,
+          evalCount: 82
+        }
+      }
+    ]);
+    expect(JSON.stringify(events)).not.toContain(untrustedResponse);
+  });
+
+  it("emits bounded response deltas only from a validated respond plan", async () => {
+    const responseText =
+      "The authoritative tool result reports feature/ollama-orchestration with local changes.";
+    const plan = JSON.stringify({
+      decision: "respond",
+      toolName: "none",
+      response: responseText
+    });
+    const fetchImpl: OllamaFetch = async () =>
+      new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: { role: "assistant", content: plan },
+          done: true,
+          done_reason: "stop"
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    const client = new OllamaClient({ fetch: fetchImpl });
+
+    const events = await collectEvents(
+      client.streamChat({
+        messages: [{ role: "user", content: "Check status." }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "repository.git_status",
+              description: "Read repository status.",
+              parameters: { type: "object", properties: {} }
+            }
+          }
+        ]
+      })
+    );
+
+    expect(
+      events
+        .filter((event) => event.type === "content")
+        .map((event) => event.content)
+        .join("")
+    ).toBe(responseText);
+    expect(events.at(-1)?.type).toBe("complete");
+  });
+
+  it("enforces numeric argument bounds and grounds generation with the full tool schema", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const responses = [
+      JSON.stringify({
+        decision: "call_tool",
+        toolName: "repository.read_file",
+        response: ""
+      }),
+      JSON.stringify({ path: "README.md", lineCount: 20 })
+    ];
+    const fetchImpl: OllamaFetch = async (_input, init) => {
+      requestBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>
+      );
+      const content = responses[requestBodies.length - 1] ?? "{}";
+      return new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: { role: "assistant", content },
+          done: true,
+          done_reason: "stop"
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    };
+    const client = new OllamaClient({ fetch: fetchImpl });
+
+    const events = await collectEvents(
+      client.streamChat({
+        messages: [{ role: "user", content: "Read README.md with 20 lines." }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "repository.read_file",
+              description: "Read a repository file.",
+              parameters: {
+                type: "object",
+                properties: {
+                  path: { type: "string" },
+                  lineCount: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 1_000,
+                    default: 200
+                  }
+                },
+                required: ["path"],
+                additionalProperties: false
+              }
+            }
+          }
+        ]
+      })
+    );
+
+    expect(requestBodies[1]).toMatchObject({
+      format: {
+        properties: {
+          lineCount: { type: "integer", minimum: 1, maximum: 1_000 }
+        }
+      }
+    });
+    expect(
+      (requestBodies[1]?.["messages"] as Array<{ content: string }>)[0]?.content
+    ).toContain('"default":200');
+    expect(events).toContainEqual({
+      type: "tool_call",
+      toolCall: {
+        name: "repository.read_file",
+        arguments: { path: "README.md", lineCount: 20 }
+      }
+    });
+  });
+
+  it("rejects a structured plan that selects an unoffered tool", async () => {
+    const plan = JSON.stringify({
+      decision: "call_tool",
+      toolName: "shell.exec",
+      response: ""
+    });
+    const fetchImpl: OllamaFetch = async () =>
+      new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: { role: "assistant", content: plan },
+          done: true
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    const client = new OllamaClient({ fetch: fetchImpl });
+
+    await expect(
+      collectEvents(
+        client.streamChat({
+          messages: [{ role: "user", content: "Run a shell." }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "repository.git_status",
+                description: "Read repository status.",
+                parameters: { type: "object", properties: {} }
+              }
+            }
+          ]
+        })
+      )
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("rejects a successful HTTP response that has no stream body", async () => {
     const fetchImpl: OllamaFetch = async () =>
       new Response(null, { status: 200 });
@@ -207,6 +438,84 @@ describe("OllamaClient streaming chat", () => {
     await expect(
       collectEvents(client.streamChat({ messages: [] }))
     ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("preserves unknown tool names and malformed argument shapes for policy rejection", async () => {
+    const fetchImpl: OllamaFetch = async () =>
+      new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { function: { name: "shell.exec", arguments: "whoami" } }
+            ]
+          },
+          done: true,
+          done_reason: "stop"
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    const client = new OllamaClient({ fetch: fetchImpl });
+
+    await expect(
+      collectEvents(client.streamChat({ messages: [] }))
+    ).resolves.toEqual([
+      {
+        type: "tool_call",
+        toolCall: { name: "shell.exec", arguments: "whoami" }
+      },
+      {
+        type: "complete",
+        metadata: {
+          model: "qwen3:4b",
+          createdAt: "2026-08-28T10:00:00.000Z",
+          doneReason: "stop"
+        }
+      }
+    ]);
+  });
+
+  it("normalizes structurally malformed tool calls into safe rejection requests", async () => {
+    const fetchImpl: OllamaFetch = async () =>
+      new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { function: { arguments: { path: "README.md" } } },
+              { unexpected: "shape" }
+            ]
+          },
+          done: true,
+          done_reason: "stop"
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    const client = new OllamaClient({ fetch: fetchImpl });
+
+    const events = await collectEvents(client.streamChat({ messages: [] }));
+    expect(events.filter((event) => event.type === "tool_call")).toEqual([
+      {
+        type: "tool_call",
+        toolCall: {
+          name: "malformed.tool_call",
+          arguments: { classification: "invalid_input", malformed: true }
+        }
+      },
+      {
+        type: "tool_call",
+        toolCall: {
+          name: "malformed.tool_call",
+          arguments: { classification: "invalid_input", malformed: true }
+        }
+      }
+    ]);
   });
 
   it("does not expose an upstream response body in its error", async () => {

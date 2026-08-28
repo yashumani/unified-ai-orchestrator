@@ -29,6 +29,7 @@ export class PathPolicyError extends Error {
 
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
 const WINDOWS_FORBIDDEN_CHARACTER = /[:*?"<>|]/u;
+const COMMAND_CONFIGURATION_FILE = /^(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|tsconfig(?:\.[^.]+)?\.json|vite\.config\.[^.]+|vitest\.config\.[^.]+)$/u;
 
 function normalizedSegments(repositoryRelativePath: string): string[] {
   const value = repositoryRelativePath.trim();
@@ -87,8 +88,24 @@ export function isProtectedRepositoryPath(
       (segment) =>
         segment === ".git" ||
         segment === ".local" ||
-        segment === "node_modules"
+        segment === "node_modules" ||
+        segment === ".cache" ||
+        segment === ".ollama" ||
+        segment === "model-cache" ||
+        segment === "local-index"
     )
+  ) {
+    return true;
+  }
+
+  const baseName = segments.at(-1) ?? "";
+  if (
+    segments.some((segment) => segment === "dist" || segment === "coverage") ||
+    normalized === "scripts" ||
+    normalized.startsWith("scripts/") ||
+    normalized === ".github/workflows" ||
+    normalized.startsWith(".github/workflows/") ||
+    COMMAND_CONFIGURATION_FILE.test(baseName)
   ) {
     return true;
   }

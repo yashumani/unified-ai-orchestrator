@@ -13,8 +13,10 @@
     "services/*"
   ],
   "scripts": {
-    "build": "tsc -b --pretty false",
-    "dev": "npm --workspace @unified-ai/api run dev",
+    "build": "tsc -b --pretty false && npm --workspace @unified-ai/web run build:assets",
+    "dev": "npm run dev:api",
+    "dev:api": "npm --workspace @unified-ai/api run dev",
+    "dev:web": "npm --workspace @unified-ai/web run dev",
     "start": "npm --workspace @unified-ai/api run start",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",

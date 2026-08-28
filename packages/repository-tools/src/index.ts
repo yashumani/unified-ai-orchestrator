@@ -10,6 +10,7 @@ export {
   listRepositoryFiles,
   readRepositoryFile,
   searchRepository,
+  type GitStatusResult,
   type ListedFiles,
   type ReadRepositoryFileResult,
   type SearchMatch

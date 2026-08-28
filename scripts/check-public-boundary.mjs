@@ -41,11 +41,15 @@ export function findForbiddenPaths(paths) {
   return violations;
 }
 
-function trackedPaths() {
-  const output = execFileSync("git", ["ls-files", "-z"], {
+function candidatePaths() {
+  const output = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    {
     encoding: "buffer",
     stdio: ["ignore", "pipe", "inherit"]
-  });
+    }
+  );
 
   return output
     .toString("utf8")
@@ -53,7 +57,7 @@ function trackedPaths() {
     .filter(Boolean);
 }
 
-export function checkPublicBoundary(paths = trackedPaths()) {
+export function checkPublicBoundary(paths = candidatePaths()) {
   const violations = findForbiddenPaths(paths);
 
   if (violations.length > 0) {
@@ -63,7 +67,7 @@ export function checkPublicBoundary(paths = trackedPaths()) {
     return false;
   }
 
-  console.log(`public-boundary check passed for ${paths.length} tracked files`);
+  console.log(`public-boundary check passed for ${paths.length} commit-candidate files`);
   return true;
 }
 

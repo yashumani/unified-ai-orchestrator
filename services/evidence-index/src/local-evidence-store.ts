@@ -9,6 +9,7 @@ import {
 import { randomUUID } from "node:crypto";
 import {
   access,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -32,6 +33,11 @@ export interface StoredObject {
 
 const DEFAULT_AGENT_RUN_RECEIPT_LIMIT = 20;
 const MAX_AGENT_RUN_RECEIPT_LIMIT = 100;
+
+interface DirectoryIdentity {
+  dev: number;
+  ino: number;
+}
 
 function isContained(root: string, candidate: string): boolean {
   const pathFromRoot = relative(root, candidate);
@@ -67,6 +73,9 @@ export class LocalEvidenceStore {
   readonly root: string;
   readonly repositoryRoot: string;
   #realRoot: string | undefined;
+  #rootIdentity: DirectoryIdentity | undefined;
+  #realRepositoryRoot: string | undefined;
+  #repositoryIdentity: DirectoryIdentity | undefined;
 
   constructor(options: LocalEvidenceStoreOptions) {
     if (!isAbsolute(options.root) || !isAbsolute(options.repositoryRoot)) {
@@ -80,24 +89,94 @@ export class LocalEvidenceStore {
       throw new Error("the repository root cannot be used as the evidence root");
     }
 
-    if (isContained(this.root, this.repositoryRoot)) {
-      throw new Error("the evidence root cannot contain the repository");
+    if (!isContained(this.repositoryRoot, this.root)) {
+      throw new Error(
+        "the evidence root must be a lexical descendant of the repository root"
+      );
     }
   }
 
   async initialize(): Promise<void> {
-    await mkdir(this.root, { recursive: true });
-    const resolvedRoot = await realpath(this.root);
     const resolvedRepositoryRoot = await realpath(this.repositoryRoot);
+    const repositoryStats = await lstat(resolvedRepositoryRoot);
+    if (!repositoryStats.isDirectory()) {
+      throw new Error("the canonical repository root must be a directory");
+    }
+
+    const repositoryIdentity = {
+      dev: repositoryStats.dev,
+      ino: repositoryStats.ino
+    };
+    if (this.#realRepositoryRoot === undefined) {
+      this.#realRepositoryRoot = resolvedRepositoryRoot;
+      this.#repositoryIdentity = repositoryIdentity;
+    } else if (
+      resolvedRepositoryRoot !== this.#realRepositoryRoot ||
+      !this.#hasSameIdentity(this.#repositoryIdentity, repositoryIdentity)
+    ) {
+      throw new Error("the repository root changed since evidence initialization");
+    }
+
+    const pathFromRepository = relative(this.repositoryRoot, this.root);
+    let current = resolvedRepositoryRoot;
+    for (const segment of pathFromRepository.split(sep).filter(Boolean)) {
+      const candidate = resolveWithinRoot(current, segment);
+      let candidateStats;
+      try {
+        candidateStats = await lstat(candidate);
+      } catch (error) {
+        if (
+          (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+          this.#realRoot !== undefined
+        ) {
+          throw error;
+        }
+        try {
+          await mkdir(candidate);
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
+            throw mkdirError;
+          }
+        }
+        candidateStats = await lstat(candidate);
+      }
+
+      if (candidateStats.isSymbolicLink()) {
+        throw new Error(
+          "the evidence root cannot traverse a symbolic link or junction"
+        );
+      }
+      if (!candidateStats.isDirectory()) {
+        throw new Error("every evidence root component must be a directory");
+      }
+      current = candidate;
+    }
+
+    const resolvedRoot = await realpath(this.root);
 
     if (
       resolvedRoot === resolvedRepositoryRoot ||
-      isContained(resolvedRoot, resolvedRepositoryRoot)
+      !isContained(resolvedRepositoryRoot, resolvedRoot)
     ) {
-      throw new Error("the resolved evidence root cannot contain the repository");
+      throw new Error(
+        "the resolved evidence root must remain inside the canonical repository"
+      );
     }
 
-    this.#realRoot = resolvedRoot;
+    const rootStats = await lstat(this.root);
+    if (rootStats.isSymbolicLink()) {
+      throw new Error("the evidence root cannot be a symbolic link or junction");
+    }
+    const rootIdentity = { dev: rootStats.dev, ino: rootStats.ino };
+    if (this.#realRoot === undefined) {
+      this.#realRoot = resolvedRoot;
+      this.#rootIdentity = rootIdentity;
+    } else if (
+      resolvedRoot !== this.#realRoot ||
+      !this.#hasSameIdentity(this.#rootIdentity, rootIdentity)
+    ) {
+      throw new Error("the evidence root changed since initialization");
+    }
   }
 
   async putObject(value: unknown): Promise<StoredObject> {
@@ -258,10 +337,19 @@ export class LocalEvidenceStore {
   }
 
   async #rootPath(): Promise<string> {
-    if (this.#realRoot === undefined) {
-      await this.initialize();
-    }
+    await this.initialize();
     return this.#realRoot as string;
+  }
+
+  #hasSameIdentity(
+    expected: DirectoryIdentity | undefined,
+    actual: DirectoryIdentity
+  ): boolean {
+    return (
+      expected !== undefined &&
+      expected.dev === actual.dev &&
+      expected.ino === actual.ino
+    );
   }
 
   async #objectPath(sha256: string): Promise<string> {
@@ -335,6 +423,16 @@ export class LocalEvidenceStore {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
           throw error;
         }
+      }
+
+      const candidateStats = await lstat(candidate);
+      if (candidateStats.isSymbolicLink()) {
+        throw new Error(
+          "an evidence directory cannot be a symbolic link or junction"
+        );
+      }
+      if (!candidateStats.isDirectory()) {
+        throw new Error("every evidence path component must be a directory");
       }
 
       current = await realpath(candidate);

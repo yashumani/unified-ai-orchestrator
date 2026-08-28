@@ -204,10 +204,12 @@ export class PolicyEngine {
             identity
           );
         }
-        resolvedPath = await resolveMutationPath(
-          identity.repositoryRoot,
-          "package.json"
-        );
+        // The fixed verifier is a repository-scoped process action, not a file
+        // mutation. Its concrete executable and argument vectors are validated
+        // by the repository tool registry, so anchoring authorization to a
+        // protected package metadata file would incorrectly make the allowed
+        // verifier impossible to run.
+        resolvedPath = identity.repositoryRoot;
       }
     } catch (error: unknown) {
       if (error instanceof PathPolicyError) {
@@ -224,7 +226,9 @@ export class PolicyEngine {
       decision: this.#decision(
         true,
         "allowed",
-        "Mutation is allowed by active workspace trust and current repository policy."
+        parsedTool.data === "repository.run_npm_script"
+          ? "Fixed repository verification is allowed by active workspace trust and current policy."
+          : "Mutation is allowed by active workspace trust and current repository policy."
       ),
       identity,
       grant: trust.grant,

@@ -14,6 +14,24 @@ const PROTECTED_PREFIXES = [
   "local-index"
 ] as const;
 
+const SENSITIVE_FILE_NAMES = new Set([
+  ".npmrc",
+  ".yarnrc",
+  ".pypirc",
+  ".netrc",
+  "credentials.json",
+  "credentials.yaml",
+  "credentials.yml",
+  "secrets.json",
+  "secrets.yaml",
+  "secrets.yml",
+  "id_rsa",
+  "id_ed25519"
+]);
+
+const COMMAND_CONFIGURATION_FILE = /^(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|tsconfig(?:\.[^.]+)?\.json|vite\.config\.[^.]+|vitest\.config\.[^.]+)$/u;
+const PRIVATE_KEY_FILE = /\.(?:key|pem|p12|pfx)$/u;
+
 export class RepositoryPathError extends Error {
   readonly code: "path_escape" | "protected_path" | "symlink_escape";
 
@@ -59,7 +77,8 @@ export function normalizeRepositoryPath(relativePath: string): string {
 export function assertPublicPath(relativePath: string): string {
   const normalized = normalizeRepositoryPath(relativePath);
   const lower = normalized.toLowerCase();
-  const baseName = lower.split("/").at(-1) ?? "";
+  const segments = lower.split("/");
+  const baseName = segments.at(-1) ?? "";
 
   if (baseName !== ".env.example" && /^\.env(?:\.|$)/u.test(baseName)) {
     throw new RepositoryPathError("protected_path", "environment files are protected");
@@ -69,6 +88,9 @@ export function assertPublicPath(relativePath: string): string {
     PROTECTED_PREFIXES.some(
       (prefix) => lower === prefix || lower.startsWith(`${prefix}/`)
     ) ||
+    segments.some((segment) => segment === "dist" || segment === "coverage") ||
+    SENSITIVE_FILE_NAMES.has(baseName) ||
+    PRIVATE_KEY_FILE.test(baseName) ||
     /(?:^|\/)[^/]*\.raw-chat\.json$/iu.test(normalized) ||
     /(?:^|\/)[^/]*(?:transcript|session)[^/]*\.jsonl$/iu.test(normalized) ||
     /(?:^|\/)[^/]*\.sqlite3?$/iu.test(normalized)
@@ -79,12 +101,35 @@ export function assertPublicPath(relativePath: string): string {
   return normalized;
 }
 
+export function assertWritablePublicPath(relativePath: string): string {
+  const normalized = assertPublicPath(relativePath);
+  const lower = normalized.toLowerCase();
+  const baseName = lower.split("/").at(-1) ?? "";
+  if (
+    lower === "scripts" ||
+    lower.startsWith("scripts/") ||
+    lower === ".github/workflows" ||
+    lower.startsWith(".github/workflows/") ||
+    COMMAND_CONFIGURATION_FILE.test(baseName)
+  ) {
+    throw new RepositoryPathError(
+      "protected_path",
+      "command and build configuration files require direct operator review"
+    );
+  }
+  return normalized;
+}
+
 export async function resolveSafeRepositoryPath(
   repositoryRoot: string,
-  relativePath: string
+  relativePath: string,
+  options: { mode?: "read" | "write" } = {}
 ): Promise<{ repositoryRoot: string; relativePath: string; absolutePath: string }> {
   const canonicalRoot = await realpath(resolve(repositoryRoot));
-  const normalized = assertPublicPath(relativePath);
+  const normalized =
+    options.mode === "write"
+      ? assertWritablePublicPath(relativePath)
+      : assertPublicPath(relativePath);
   const segments = normalized.split("/");
   const candidate = resolve(canonicalRoot, ...segments);
   if (!isContained(canonicalRoot, candidate)) {

@@ -1,5 +1,6 @@
 import {
   PINNED_OLLAMA_MODEL,
+  type AgentConversationMessage,
   type OllamaMessage,
   type ToolDefinition
 } from "@unified-ai/contracts";
@@ -15,10 +16,15 @@ export const ORCHESTRATOR_SYSTEM_PROMPT = [
   "When a tool is blocked, explain the boundary and continue safely. Keep the final response concise and evidence-based."
 ].join("\n");
 
-export function initialMessages(userMessage: string): OllamaMessage[] {
+export function initialMessages(
+  conversation: readonly AgentConversationMessage[]
+): OllamaMessage[] {
   return [
     { role: "system", content: ORCHESTRATOR_SYSTEM_PROMPT },
-    { role: "user", content: userMessage }
+    ...conversation.map((message) => ({
+      role: message.role,
+      content: message.content
+    }))
   ];
 }
 

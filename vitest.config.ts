@@ -5,13 +5,24 @@ export default defineConfig({
     coverage: {
       enabled: false
     },
-    environment: "node",
-    include: [
-      "apps/**/*.test.ts",
-      "apps/**/*.test.tsx",
-      "packages/**/*.test.ts",
-      "services/**/*.test.ts",
-      "scripts/**/*.test.mjs"
+    projects: [
+      {
+        extends: false,
+        test: {
+          name: "node",
+          environment: "node",
+          pool: "threads",
+          maxWorkers: 1,
+          fileParallelism: false,
+          include: [
+            "apps/api/**/*.test.ts",
+            "packages/**/*.test.ts",
+            "services/**/*.test.ts",
+            "scripts/**/*.test.mjs"
+          ]
+        }
+      },
+      "./apps/web/vite.config.ts"
     ]
   }
 });

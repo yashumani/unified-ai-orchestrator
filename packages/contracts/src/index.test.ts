@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentRunReceiptSchema,
+  AgentUsageSchema,
   ClaimRecordSchema,
   ConversationSnapshotSchema,
   EvidenceEnvelopeSchema,
@@ -126,14 +127,35 @@ describe("orchestration contracts", () => {
       AgentRunReceiptSchema.parse({
         schemaVersion: SCHEMA_VERSION,
         runId: "run-001",
+        threadId: "thread-001",
+        messageIds: ["message-001"],
         status: "succeeded",
         model: PINNED_OLLAMA_MODEL,
+        runtime: { contextSize: 4096, temperature: 0.2, thinking: false },
+        toolSchemaObjectSha256: sha,
+        workspace: {
+          repositoryRootSha256: sha,
+          originSha256: sha,
+          branch: "feature/test"
+        },
         startedAt: "2026-08-28T05:00:00.000Z",
         completedAt: "2026-08-28T05:01:00.000Z",
         iterations: 9,
         toolCalls: [],
         inputObjectSha256: sha
       })
+    ).toThrow();
+  });
+
+  it("records whether Ollama usage counters were available", () => {
+    expect(AgentUsageSchema.parse({ available: false })).toEqual({
+      available: false
+    });
+    expect(
+      AgentUsageSchema.parse({ available: true, evalCount: 12 })
+    ).toEqual({ available: true, evalCount: 12 });
+    expect(() =>
+      AgentUsageSchema.parse({ available: false, evalCount: 12 })
     ).toThrow();
   });
 });

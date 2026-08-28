@@ -6,20 +6,26 @@ import {
   PolicyDecisionSchema,
   SCHEMA_VERSION,
   ToolResultSchema,
+  type AgentConversationMessage,
   type AgentRunEvent,
   type AgentRunReceipt,
   type AgentToolReceipt,
+  type AgentUsage,
+  type AgentWorkspaceEvidence,
   type OllamaMessage,
-  type PolicyErrorCode,
+  type PolicyDecision,
   type ToolCall,
   type ToolDefinition,
   type ToolResult
 } from "@unified-ai/contracts";
-import type {
-  OllamaChatRequest,
-  OllamaStreamEvent
+import {
+  OLLAMA_CONTEXT_SIZE,
+  OLLAMA_TEMPERATURE,
+  type OllamaChatRequest,
+  type OllamaCompletionMetadata,
+  type OllamaStreamEvent
 } from "@unified-ai/ollama-client";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AsyncEventStream } from "./event-stream.js";
 import { initialMessages, toOllamaTools } from "./prompt.js";
 
@@ -37,7 +43,10 @@ export interface OllamaAgentPort {
 
 export interface RepositoryToolPort {
   listDefinitions(): ToolDefinition[];
-  execute(call: ToolCall): Promise<ToolResult>;
+  execute(
+    call: ToolCall,
+    options?: { signal?: AbortSignal }
+  ): Promise<ToolResult>;
 }
 
 export interface StoredEvidenceObject {
@@ -54,6 +63,7 @@ export interface AgentRunnerOptions {
   ollama: OllamaAgentPort;
   tools: RepositoryToolPort;
   evidence: AgentEvidencePort;
+  workspaceContext?: () => Promise<AgentWorkspaceEvidence>;
   timeoutMs?: number;
   now?: () => Date;
   runId?: () => string;
@@ -79,8 +89,13 @@ export class AgentEvidenceError extends Error {
 
 interface RunContext {
   runId: string;
+  threadId: string;
+  messageIds: string[];
   startedAt: string;
   inputObjectSha256: string;
+  toolSchemaObjectSha256: string;
+  workspace: AgentWorkspaceEvidence;
+  usage: AgentUsage;
   events: AsyncEventStream<AgentRunEvent>;
   signal: AbortSignal;
   timedOut: () => boolean;
@@ -89,30 +104,99 @@ interface RunContext {
   toolReceipts: AgentToolReceipt[];
 }
 
-function safeErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.length > 0) {
-    return error.message.slice(0, 1_000);
-  }
-  return "Agent run failed.";
+function sha256(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
-function policyCode(result: ToolResult): PolicyErrorCode {
-  if (typeof result.data !== "object" || result.data === null) {
-    return "allowed";
+function sha256Json(value: unknown): string {
+  return sha256(JSON.stringify(value) ?? "undefined");
+}
+
+function fallbackWorkspaceContext(): AgentWorkspaceEvidence {
+  return {
+    repositoryRootSha256: sha256("workspace-unavailable"),
+    originSha256: sha256("origin-unavailable"),
+    branch: "unavailable"
+  };
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "Agent operation was cancelled.";
   }
-  const policy = (result.data as { policy?: unknown }).policy;
-  const parsed = PolicyDecisionSchema.safeParse(policy);
-  return parsed.success ? parsed.data.code : "allowed";
+  return "Agent run failed safely.";
+}
+
+function policyDecision(result: ToolResult, checkedAt: string): PolicyDecision {
+  if (typeof result.data === "object" && result.data !== null) {
+    const parsed = PolicyDecisionSchema.safeParse(
+      (result.data as { policy?: unknown }).policy
+    );
+    if (parsed.success) {
+      return parsed.data;
+    }
+  }
+  return PolicyDecisionSchema.parse({
+    allowed: true,
+    code: "allowed",
+    reason: "The fixed catalog classifies this as a read-only repository tool.",
+    checkedAt
+  });
 }
 
 function toolOutcome(
   result: ToolResult,
-  code: PolicyErrorCode
+  decision: PolicyDecision
 ): AgentToolReceipt["outcome"] {
-  if (code !== "allowed") {
+  if (!decision.allowed) {
     return "blocked";
   }
   return result.ok ? "succeeded" : "failed";
+}
+
+function argumentRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function safeArgumentEvidence(call: ToolCall): Record<string, unknown> {
+  const source = argumentRecord(call.arguments);
+  const safe: Record<string, unknown> = {
+    shape: typeof call.arguments,
+    keyCount: Object.keys(source).length
+  };
+  for (const key of [
+    "path",
+    "prefix",
+    "query",
+    "script",
+    "content",
+    "search",
+    "replacement"
+  ]) {
+    const item = source[key];
+    if (typeof item === "string") {
+      safe[`${key}Characters`] = item.length;
+      safe[`${key}Sha256`] = sha256(item);
+    }
+  }
+  for (const key of [
+    "startLine",
+    "lineCount",
+    "limit",
+    "caseSensitive",
+    "expectedOccurrences"
+  ]) {
+    const item = source[key];
+    if (typeof item === "number" || typeof item === "boolean") {
+      safe[key] = item;
+    }
+  }
+  if (typeof source["expectedSha256"] === "string") {
+    safe["hasExpectedSha256"] = true;
+  }
+  return safe;
 }
 
 function assistantToolMessage(
@@ -141,15 +225,63 @@ function modelToolResult(result: ToolResult): string {
     truncated: true,
     data: {
       notice: "Tool output exceeded the model-visible limit. Request a narrower read or search.",
-      preview: serialized.slice(0, MAX_MODEL_TOOL_RESULT_CHARACTERS)
+      payloadSha256: sha256(serialized)
     }
   });
+}
+
+function accumulateUsage(
+  usage: AgentUsage,
+  metadata: OllamaCompletionMetadata
+): AgentUsage {
+  const result: AgentUsage = { ...usage };
+  let reported = false;
+  for (const key of [
+    "totalDuration",
+    "loadDuration",
+    "promptEvalCount",
+    "promptEvalDuration",
+    "evalCount",
+    "evalDuration"
+  ] as const) {
+    const value = metadata[key];
+    if (value !== undefined) {
+      reported = true;
+      result[key] = (result[key] ?? 0) + value;
+    }
+  }
+  result.available = usage.available || reported;
+  return result;
+}
+
+function normalizeConversation(
+  request: ReturnType<typeof AgentRunRequestSchema.parse>,
+  runId: string
+): { threadId: string; messages: AgentConversationMessage[] } {
+  if (request.messages !== undefined) {
+    return {
+      threadId: request.threadId ?? `thread-${runId}`,
+      messages: request.messages
+    };
+  }
+  const content = request.message as string;
+  return {
+    threadId: request.threadId ?? `thread-${runId}`,
+    messages: [
+      {
+        messageId: `message-${sha256(content).slice(0, 24)}`,
+        role: "user",
+        content
+      }
+    ]
+  };
 }
 
 export class AgentRunner {
   readonly #ollama: OllamaAgentPort;
   readonly #tools: RepositoryToolPort;
   readonly #evidence: AgentEvidencePort;
+  readonly #workspaceContext: () => Promise<AgentWorkspaceEvidence>;
   readonly #timeoutMs: number;
   readonly #now: () => Date;
   readonly #runId: () => string;
@@ -158,6 +290,8 @@ export class AgentRunner {
     this.#ollama = options.ollama;
     this.#tools = options.tools;
     this.#evidence = options.evidence;
+    this.#workspaceContext =
+      options.workspaceContext ?? (async () => fallbackWorkspaceContext());
     this.#timeoutMs = Math.max(
       1_000,
       Math.min(options.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS, 600_000)
@@ -166,9 +300,13 @@ export class AgentRunner {
     this.#runId = options.runId ?? (() => `run-${randomUUID()}`);
   }
 
-  start(rawRequest: { runId?: string | undefined; message: string }, options: StartAgentRunOptions = {}): AgentRunHandle {
+  start(
+    rawRequest: Parameters<typeof AgentRunRequestSchema.parse>[0],
+    options: StartAgentRunOptions = {}
+  ): AgentRunHandle {
     const request = AgentRunRequestSchema.parse(rawRequest);
     const runId = request.runId ?? this.#runId();
+    const conversation = normalizeConversation(request, runId);
     const events = new AsyncEventStream<AgentRunEvent>();
     const controller = new AbortController();
     let timedOut = false;
@@ -184,7 +322,14 @@ export class AgentRunner {
     }, this.#timeoutMs);
     timer.unref?.();
 
-    const completion = this.#execute(runId, request.message, events, controller.signal, () => timedOut)
+    const completion = this.#execute(
+      runId,
+      conversation.threadId,
+      conversation.messages,
+      events,
+      controller.signal,
+      () => timedOut
+    )
       .then((receipt) => {
         events.close();
         return receipt;
@@ -208,25 +353,46 @@ export class AgentRunner {
 
   async #execute(
     runId: string,
-    userMessage: string,
+    threadId: string,
+    conversation: AgentConversationMessage[],
     events: AsyncEventStream<AgentRunEvent>,
     signal: AbortSignal,
     timedOut: () => boolean
   ): Promise<AgentRunReceipt> {
     const startedAt = this.#now().toISOString();
-    const input = await this.#evidence.putObject({
-      schemaVersion: SCHEMA_VERSION,
-      kind: "agent-run-input",
-      runId,
-      model: PINNED_OLLAMA_MODEL,
-      startedAt,
-      message: userMessage
-    });
+    const definitions = this.#tools.listDefinitions();
+    const [input, toolSchema, workspace] = await Promise.all([
+      this.#evidence.putObject({
+        schemaVersion: SCHEMA_VERSION,
+        kind: "agent-run-input-metadata",
+        runId,
+        threadId,
+        model: PINNED_OLLAMA_MODEL,
+        startedAt,
+        messages: conversation.map((message) => ({
+          messageId: message.messageId,
+          role: message.role,
+          contentSha256: sha256(message.content),
+          contentCharacters: message.content.length
+        }))
+      }),
+      this.#evidence.putObject({
+        schemaVersion: SCHEMA_VERSION,
+        kind: "agent-tool-schema",
+        definitions
+      }),
+      this.#workspaceContext()
+    ]);
     let sequence = 0;
     const context: RunContext = {
       runId,
+      threadId,
+      messageIds: conversation.map((message) => message.messageId),
       startedAt,
       inputObjectSha256: input.sha256,
+      toolSchemaObjectSha256: toolSchema.sha256,
+      workspace,
+      usage: { available: false },
       events,
       signal,
       timedOut,
@@ -237,7 +403,7 @@ export class AgentRunner {
     this.#emit(context, "run_started", { message: "Agent run started." });
 
     try {
-      return await this.#runLoop(context, userMessage);
+      return await this.#runLoop(context, conversation, definitions);
     } catch (error) {
       if (error instanceof AgentEvidenceError) {
         throw error;
@@ -262,21 +428,28 @@ export class AgentRunner {
     }
   }
 
-  async #runLoop(context: RunContext, userMessage: string): Promise<AgentRunReceipt> {
-    const messages = initialMessages(userMessage);
-    const tools = toOllamaTools(this.#tools.listDefinitions());
+  async #runLoop(
+    context: RunContext,
+    conversation: AgentConversationMessage[],
+    definitions: ToolDefinition[]
+  ): Promise<AgentRunReceipt> {
+    const messages = initialMessages(conversation);
+    const tools = toOllamaTools(definitions);
     let toolCallCount = 0;
 
     while (context.iterations < MAX_AGENT_ITERATIONS) {
       if (context.signal.aborted) {
-        throw new Error(context.timedOut() ? "Agent run timed out." : "Agent run was cancelled.");
+        throw new DOMException("Agent run was cancelled.", "AbortError");
       }
       context.iterations += 1;
       let assistantContent = "";
       const pendingCalls: ToolCall[] = [];
       let streamCompleted = false;
 
-      for await (const event of this.#ollama.streamChat({ messages, tools }, context.signal)) {
+      for await (const event of this.#ollama.streamChat(
+        { messages, tools },
+        context.signal
+      )) {
         if (event.type === "content") {
           assistantContent += event.content;
           this.#emit(context, "assistant_delta", { message: event.content });
@@ -289,6 +462,7 @@ export class AgentRunner {
           });
         } else if (event.type === "complete") {
           streamCompleted = true;
+          context.usage = accumulateUsage(context.usage, event.metadata);
         }
       }
 
@@ -301,10 +475,11 @@ export class AgentRunner {
         }
         const output = await this.#evidence.putObject({
           schemaVersion: SCHEMA_VERSION,
-          kind: "agent-run-output",
+          kind: "agent-run-output-metadata",
           runId: context.runId,
           completedAt: this.#now().toISOString(),
-          content: assistantContent
+          contentSha256: sha256(assistantContent),
+          contentCharacters: assistantContent.length
         });
         const receipt = await this.#persistReceipt(context, {
           status: "succeeded",
@@ -313,7 +488,9 @@ export class AgentRunner {
           outputObjectSha256: output.sha256,
           warnings: []
         });
-        this.#emit(context, "run_completed", { message: "Agent run completed with immutable evidence." });
+        this.#emit(context, "run_completed", {
+          message: "Agent run completed with immutable evidence."
+        });
         return receipt;
       }
 
@@ -324,32 +501,62 @@ export class AgentRunner {
           toolCalls: context.toolReceipts,
           warnings: [`Agent requested more than ${MAX_AGENT_TOOL_CALLS} tools.`]
         });
-        this.#emit(context, "run_stopped", { message: `Tool-call limit ${MAX_AGENT_TOOL_CALLS} reached.` });
+        this.#emit(context, "run_stopped", {
+          message: `Tool-call limit ${MAX_AGENT_TOOL_CALLS} reached.`
+        });
         return receipt;
       }
 
       messages.push(assistantToolMessage(assistantContent, pendingCalls));
       for (const call of pendingCalls) {
         if (context.signal.aborted) {
-          throw new Error(context.timedOut() ? "Agent run timed out." : "Agent run was cancelled.");
+          throw new DOMException("Agent run was cancelled.", "AbortError");
         }
         this.#emit(context, "tool_started", { toolCall: call });
-        const result = ToolResultSchema.parse(await this.#tools.execute(call));
-        const resultObject = await this.#evidence.putObject({
-          schemaVersion: SCHEMA_VERSION,
-          kind: "agent-tool-result",
-          runId: context.runId,
-          result
-        });
-        const code = policyCode(result);
+        const result = ToolResultSchema.parse(
+          await this.#tools.execute(call, { signal: context.signal })
+        );
+        const checkedAt = this.#now().toISOString();
+        const decision = policyDecision(result, checkedAt);
+        const [argumentsObject, resultObject] = await Promise.all([
+          this.#evidence.putObject({
+            schemaVersion: SCHEMA_VERSION,
+            kind: "agent-tool-arguments-metadata",
+            runId: context.runId,
+            callId: call.callId,
+            toolName: call.toolName,
+            payloadSha256: sha256Json(call.arguments),
+            arguments: safeArgumentEvidence(call)
+          }),
+          this.#evidence.putObject({
+            schemaVersion: SCHEMA_VERSION,
+            kind: "agent-tool-result-metadata",
+            runId: context.runId,
+            callId: call.callId,
+            toolName: call.toolName,
+            ok: result.ok,
+            summary: result.summary.slice(0, 2_000),
+            policy: decision,
+            truncated: result.truncated,
+            resultPayloadSha256: sha256Json(result)
+          })
+        ]);
         context.toolReceipts.push({
           callId: call.callId,
           toolName: call.toolName,
-          policyCode: code,
-          outcome: toolOutcome(result, code),
-          resultObjectSha256: resultObject.sha256
+          argumentsObjectSha256: argumentsObject.sha256,
+          policyCode: decision.code,
+          policyReason: decision.reason.slice(0, 2_000),
+          policyCheckedAt: decision.checkedAt,
+          outcome: toolOutcome(result, decision),
+          resultObjectSha256: resultObject.sha256,
+          resultPayloadSha256: sha256Json(result),
+          summary: result.summary.slice(0, 2_000)
         });
-        this.#emit(context, "tool_completed", { toolCall: call, toolResult: result });
+        this.#emit(context, "tool_completed", {
+          toolCall: call,
+          toolResult: result
+        });
         messages.push({
           role: "tool",
           tool_name: call.toolName,
@@ -364,7 +571,9 @@ export class AgentRunner {
       toolCalls: context.toolReceipts,
       warnings: [`Agent reached the ${MAX_AGENT_ITERATIONS}-iteration limit.`]
     });
-    this.#emit(context, "run_stopped", { message: `Iteration limit ${MAX_AGENT_ITERATIONS} reached.` });
+    this.#emit(context, "run_stopped", {
+      message: `Iteration limit ${MAX_AGENT_ITERATIONS} reached.`
+    });
     return receipt;
   }
 
@@ -396,8 +605,17 @@ export class AgentRunner {
     const receipt = AgentRunReceiptSchema.parse({
       schemaVersion: SCHEMA_VERSION,
       runId: context.runId,
+      threadId: context.threadId,
+      messageIds: context.messageIds,
       status: fields.status,
       model: PINNED_OLLAMA_MODEL,
+      runtime: {
+        contextSize: OLLAMA_CONTEXT_SIZE,
+        temperature: OLLAMA_TEMPERATURE,
+        thinking: false
+      },
+      toolSchemaObjectSha256: context.toolSchemaObjectSha256,
+      workspace: context.workspace,
       startedAt: context.startedAt,
       completedAt: this.#now().toISOString(),
       iterations: fields.iterations,
@@ -406,6 +624,7 @@ export class AgentRunner {
       ...(fields.outputObjectSha256 === undefined
         ? {}
         : { outputObjectSha256: fields.outputObjectSha256 }),
+      usage: context.usage,
       warnings: fields.warnings
     });
     try {

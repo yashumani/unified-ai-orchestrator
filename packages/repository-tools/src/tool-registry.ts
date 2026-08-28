@@ -1,5 +1,7 @@
 import {
+  MALFORMED_TOOL_CALL_NAME,
   PolicyDecisionSchema,
+  RepositoryToolNameSchema,
   ToolCallSchema,
   ToolResultSchema,
   type PolicyDecision,
@@ -52,6 +54,12 @@ const replaceInput = z.object({
 }).strict();
 const directoryInput = z.object({ path: z.string().min(1) }).strict();
 const npmInput = z.object({ script: z.string().min(1) }).strict();
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("Repository tool execution was cancelled.", "AbortError");
+  }
+}
 
 const definitions: ToolDefinition[] = [
   {
@@ -162,14 +170,14 @@ const definitions: ToolDefinition[] = [
   },
   {
     name: "repository.run_npm_script",
-    description: "Run one fixed allowlisted root npm script without arbitrary arguments.",
+    description: "Run one fixed, metadata-only verification command without arbitrary arguments.",
     mode: "write",
     inputSchema: {
       type: "object",
       properties: {
         script: {
           type: "string",
-          enum: ["check:public-boundary", "typecheck", "test", "build", "verify", "ingest:fixture"]
+          enum: ["check:public-boundary", "typecheck"]
         }
       },
       required: ["script"],
@@ -178,7 +186,7 @@ const definitions: ToolDefinition[] = [
   }
 ];
 
-const mutatingTools = new Set<RepositoryToolName>(
+const mutatingTools = new Set<string>(
   definitions.filter((definition) => definition.mode === "write").map((definition) => definition.name)
 );
 
@@ -203,8 +211,36 @@ export class RepositoryToolRegistry {
     }));
   }
 
-  async execute(rawCall: ToolCall): Promise<ToolResult> {
+  async execute(
+    rawCall: ToolCall,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ToolResult> {
     const call = ToolCallSchema.parse(rawCall);
+    throwIfAborted(options.signal);
+    let mutationPolicy: PolicyDecision | undefined;
+    const knownTool = RepositoryToolNameSchema.safeParse(call.toolName);
+    if (!knownTool.success) {
+      const malformed = call.toolName === MALFORMED_TOOL_CALL_NAME;
+      return ToolResultSchema.parse({
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: false,
+        summary: malformed
+          ? "Policy rejected a malformed model tool call."
+          : "Policy rejected an unknown tool name.",
+        data: {
+          policy: {
+            allowed: false,
+            code: malformed ? "invalid_input" : "tool_not_allowed",
+            reason: malformed
+              ? "The local model returned a structurally invalid tool call."
+              : "The requested tool is not in the fixed repository tool catalog.",
+            checkedAt: new Date().toISOString()
+          }
+        },
+        truncated: false
+      });
+    }
     if (mutatingTools.has(call.toolName)) {
       const decision = PolicyDecisionSchema.parse(await this.#authorizeMutation(call));
       if (!decision.allowed) {
@@ -217,51 +253,82 @@ export class RepositoryToolRegistry {
           truncated: false
         });
       }
+      mutationPolicy = decision;
     }
 
     try {
-      const data = await this.#dispatch(call);
+      const data = await this.#dispatch(call, options.signal);
+      throwIfAborted(options.signal);
+      const resultData =
+        mutationPolicy === undefined
+          ? data
+          : {
+              ...(typeof data === "object" && data !== null && !Array.isArray(data)
+                ? data
+                : { value: data }),
+              policy: mutationPolicy
+            };
       return ToolResultSchema.parse({
         callId: call.callId,
         toolName: call.toolName,
         ok: true,
         summary: `${call.toolName} completed.`,
-        data,
+        data: resultData,
         truncated: typeof data === "object" && data !== null && "truncated" in data
           ? (data as { truncated?: unknown }).truncated === true
           : false
       });
     } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
       return ToolResultSchema.parse({
         callId: call.callId,
         toolName: call.toolName,
         ok: false,
-        summary: error instanceof Error ? error.message : "repository tool failed",
+        summary: "Repository tool arguments or execution failed safely.",
+        data: {
+          policy: {
+            allowed: false,
+            code: "invalid_input",
+            reason: "The requested tool arguments or bounded execution were invalid.",
+            checkedAt: new Date().toISOString()
+          }
+        },
         truncated: false
       });
     }
   }
 
-  async #dispatch(call: ToolCall): Promise<unknown> {
+  async #dispatch(call: ToolCall, signal?: AbortSignal): Promise<unknown> {
     switch (call.toolName) {
       case "repository.list_files": {
         const input = listFilesInput.parse(call.arguments);
-        return listRepositoryFiles(this.#repositoryRoot, input);
+        return listRepositoryFiles(this.#repositoryRoot, {
+          ...input,
+          ...(signal === undefined ? {} : { signal })
+        });
       }
       case "repository.read_file": {
         const input = readFileInput.parse(call.arguments);
-        return readRepositoryFile(this.#repositoryRoot, input.path, input);
+        return readRepositoryFile(this.#repositoryRoot, input.path, {
+          ...input,
+          ...(signal === undefined ? {} : { signal })
+        });
       }
       case "repository.search": {
         const input = searchInput.parse(call.arguments);
-        return searchRepository(this.#repositoryRoot, input.query, input);
+        return searchRepository(this.#repositoryRoot, input.query, {
+          ...input,
+          ...(signal === undefined ? {} : { signal })
+        });
       }
       case "repository.git_status":
         optionalPathInput.parse(call.arguments);
-        return getGitStatus(this.#repositoryRoot);
+        return getGitStatus(this.#repositoryRoot, signal);
       case "repository.git_diff": {
         const input = optionalPathInput.parse(call.arguments);
-        return getGitDiff(this.#repositoryRoot, input.path);
+        return getGitDiff(this.#repositoryRoot, input.path, signal);
       }
       case "repository.write_file":
         return writeRepositoryFile(this.#repositoryRoot, writeFileInput.parse(call.arguments));
@@ -273,8 +340,12 @@ export class RepositoryToolRegistry {
       }
       case "repository.run_npm_script": {
         const input = npmInput.parse(call.arguments);
-        return runNpmScript(this.#repositoryRoot, input.script);
+        return runNpmScript(this.#repositoryRoot, input.script, {
+          ...(signal === undefined ? {} : { signal })
+        });
       }
+      default:
+        throw new Error("unknown repository tool");
     }
   }
 }

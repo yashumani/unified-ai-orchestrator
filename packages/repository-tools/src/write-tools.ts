@@ -43,7 +43,9 @@ export async function writeRepositoryFile(
   if (Buffer.byteLength(input.content, "utf8") > 1_000_000) {
     throw new Error("write content exceeds the 1 MB limit");
   }
-  const safe = await resolveSafeRepositoryPath(repositoryRoot, input.path);
+  const safe = await resolveSafeRepositoryPath(repositoryRoot, input.path, {
+    mode: "write"
+  });
   const previousSha256 = await existingHash(safe.absolutePath);
 
   if (previousSha256 === undefined && input.expectedSha256 !== undefined) {
@@ -85,7 +87,9 @@ export async function replaceRepositoryText(
   if (!Number.isInteger(input.expectedOccurrences) || input.expectedOccurrences < 1) {
     throw new Error("expectedOccurrences must be a positive integer");
   }
-  const safe = await resolveSafeRepositoryPath(repositoryRoot, input.path);
+  const safe = await resolveSafeRepositoryPath(repositoryRoot, input.path, {
+    mode: "write"
+  });
   const current = await readFile(safe.absolutePath, "utf8");
   const currentSha256 = sha256(current);
   if (currentSha256 !== input.expectedSha256) {
@@ -111,8 +115,12 @@ export async function createRepositoryDirectory(
   repositoryRoot: string,
   relativePath: string
 ): Promise<{ path: string }> {
-  const safe = await resolveSafeRepositoryPath(repositoryRoot, relativePath);
+  const safe = await resolveSafeRepositoryPath(repositoryRoot, relativePath, {
+    mode: "write"
+  });
   await mkdir(safe.absolutePath, { recursive: true });
-  const verified = await resolveSafeRepositoryPath(repositoryRoot, relativePath);
+  const verified = await resolveSafeRepositoryPath(repositoryRoot, relativePath, {
+    mode: "write"
+  });
   return { path: verified.relativePath };
 }

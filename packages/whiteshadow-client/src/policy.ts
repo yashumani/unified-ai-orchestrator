@@ -23,15 +23,6 @@ export const WHITESHADOW_SAFE_CAPABILITIES = [
     path: "/api/runtime"
   },
   {
-    capabilityId: "capability-catalog",
-    name: "Capability catalog",
-    description: "Read capability catalog counts and generation metadata.",
-    risk: "safe",
-    modelUse: "none",
-    mode: "read",
-    path: "/api/capabilities/catalog"
-  },
-  {
     capabilityId: "skills-catalog",
     name: "Skills catalog",
     description: "Read WhiteShadow skill catalog counts without running a skill.",

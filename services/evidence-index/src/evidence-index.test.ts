@@ -6,7 +6,16 @@ import {
   type AgentRunReceipt,
   type EvidenceReceipt
 } from "@unified-ai/contracts";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,8 +57,17 @@ function makeAgentRunReceipt(
   return AgentRunReceiptSchema.parse({
     schemaVersion: SCHEMA_VERSION,
     runId,
+    threadId: "thread-evidence",
+    messageIds: ["message-evidence"],
     status: "succeeded",
     model: PINNED_OLLAMA_MODEL,
+    runtime: { contextSize: 4096, temperature: 0.2, thinking: false },
+    toolSchemaObjectSha256: "c".repeat(64),
+    workspace: {
+      repositoryRootSha256: "d".repeat(64),
+      originSha256: "e".repeat(64),
+      branch: "feature/evidence"
+    },
     startedAt: completedAt,
     completedAt,
     iterations: 1,
@@ -94,7 +112,7 @@ describe("local evidence store", () => {
     );
   });
 
-  it("rejects the repository root and its parent as evidence roots", async () => {
+  it("requires the evidence root to be a lexical repository descendant", async () => {
     const root = await mkdtemp(join(tmpdir(), "uao-root-test-"));
     temporaryRoots.push(root);
     const repositoryRoot = join(root, "repository");
@@ -114,7 +132,97 @@ describe("local evidence store", () => {
           root,
           repositoryRoot
         })
-    ).toThrow(/cannot contain/u);
+    ).toThrow(/lexical descendant/u);
+
+    expect(
+      () =>
+        new LocalEvidenceStore({
+          root: join(root, "outside"),
+          repositoryRoot
+        })
+    ).toThrow(/lexical descendant/u);
+  });
+
+  it("rejects an evidence root component that is an outside junction", async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "uao-junction-test-"));
+    temporaryRoots.push(root);
+    const repositoryRoot = join(root, "repository");
+    const outsideRoot = join(root, "outside");
+    await mkdir(repositoryRoot);
+    await mkdir(outsideRoot);
+
+    try {
+      await symlink(
+        outsideRoot,
+        join(repositoryRoot, ".local"),
+        process.platform === "win32" ? "junction" : "dir"
+      );
+    } catch (error) {
+      if (
+        ["EPERM", "EACCES"].includes(
+          (error as NodeJS.ErrnoException).code ?? ""
+        )
+      ) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const store = new LocalEvidenceStore({
+      root: join(repositoryRoot, ".local", "evidence"),
+      repositoryRoot
+    });
+
+    await expect(store.initialize()).rejects.toThrow(/symbolic link|junction/u);
+    expect(await readdir(outsideRoot)).toEqual([]);
+  });
+
+  it("rejects a cached evidence root replaced by an outside junction", async (context) => {
+    const { root, repositoryRoot, store } = await makeStore();
+    const evidenceRoot = join(repositoryRoot, ".local", "evidence");
+    const originalRoot = join(repositoryRoot, ".local", "evidence-original");
+    const outsideRoot = join(root, "outside");
+    await store.initialize();
+    await mkdir(outsideRoot);
+    await rename(evidenceRoot, originalRoot);
+
+    try {
+      await symlink(
+        outsideRoot,
+        evidenceRoot,
+        process.platform === "win32" ? "junction" : "dir"
+      );
+    } catch (error) {
+      await rename(originalRoot, evidenceRoot);
+      if (
+        ["EPERM", "EACCES"].includes(
+          (error as NodeJS.ErrnoException).code ?? ""
+        )
+      ) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(store.putObject({ redirected: true })).rejects.toThrow(
+      /symbolic link|junction/u
+    );
+    expect(await readdir(outsideRoot)).toEqual([]);
+  });
+
+  it("rejects a cached evidence root replaced by a different directory", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const evidenceRoot = join(repositoryRoot, ".local", "evidence");
+    const originalRoot = join(repositoryRoot, ".local", "evidence-original");
+    await store.initialize();
+    await rename(evidenceRoot, originalRoot);
+    await mkdir(evidenceRoot);
+
+    await expect(store.putObject({ replaced: true })).rejects.toThrow(
+      /changed since initialization/u
+    );
   });
 
   it("writes identical objects idempotently and verifies integrity", async () => {
@@ -127,6 +235,22 @@ describe("local evidence store", () => {
     expect(second).toEqual(first);
     expect(await store.readObject(first.sha256)).toEqual(value);
     expect(resolve(repositoryRoot, first.relativePath)).not.toBe(repositoryRoot);
+  });
+
+  it("creates the evidence root safely under concurrent first writes", async () => {
+    const { store } = await makeStore();
+    const values = Array.from({ length: 16 }, (_, index) => ({
+      schemaVersion: SCHEMA_VERSION,
+      index
+    }));
+
+    const stored = await Promise.all(values.map((value) => store.putObject(value)));
+
+    await Promise.all(
+      stored.map(async (item, index) => {
+        expect(await store.readObject(item.sha256)).toEqual(values[index]);
+      })
+    );
   });
 
   it("detects tampered evidence", async () => {
