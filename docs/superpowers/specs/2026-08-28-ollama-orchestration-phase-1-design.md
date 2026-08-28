@@ -127,14 +127,14 @@ The adapter validates every newline-delimited JSON chunk and normalizes text, th
 
 For each user turn:
 
-1. Build a system prompt containing the repository boundary and available tool schemas.
-2. Send conversation messages and tool schemas to Ollama.
-3. Stream assistant text and tool-call events.
-4. Validate every requested tool name and argument object.
-5. Ask the policy engine for an execution decision.
-6. Execute permitted tools one at a time.
-7. Append tool results to the conversation.
-8. Continue until the model returns final text or the run reaches its limit.
+1. Build a system prompt containing the repository boundary and fixed tool catalog.
+2. Ask Ollama for a schema-constrained decision: select one offered tool or return a final response.
+3. Ignore any speculative response paired with a tool decision.
+4. For a selected tool, make a second schema-constrained request for its argument object using both a grammar-safe schema and the full repository validation schema.
+5. Reject unoffered tool names, non-object arguments, inconsistent decisions, and malformed structured output.
+6. Revalidate the complete fixed tool schema and ask the policy engine for an execution decision.
+7. Execute one permitted tool, append its normalized result to the conversation, and repeat.
+8. Stream only text from a validated final-response decision, or stop when the run reaches its limit.
 
 Limits:
 
@@ -254,15 +254,14 @@ Phase 1 exposes these typed tools:
 - `repo_write_text`: create or replace a UTF-8 text file with an expected-hash precondition.
 - `repo_replace_text`: replace an exact text occurrence with expected-hash and occurrence-count preconditions.
 - `repo_create_directory`: create a bounded repository directory.
-- `repo_run_npm_script`: run an allowlisted script already declared in the root `package.json`.
+- `repo_run_npm_script`: select one fixed built-in verification routine. The legacy tool name does not grant authority to evaluate a `package.json` script body.
 
-Initial npm script allowlist:
+Initial verification allowlist:
 
+- `check:public-boundary` (fixed Node invocation of the checked-in boundary verifier)
 - `typecheck`
-- `test`
-- `build`
-- `verify`
-- `ingest:fixture`
+
+Both routines use fixed executable and argument vectors, a credential-free child environment, bounded execution, and hash/count-only output summaries. Model-written package metadata cannot change the executed command.
 
 The phase does not expose arbitrary shell, arbitrary process execution, package installation, Git commit, Git push, branch deletion, reset, clean, stash, or checkout tools to the model.
 
@@ -274,10 +273,12 @@ WhiteShadow remains a separate, read-only dependency in Phase 1.
 
 The adapter may call:
 
-- health and runtime status;
-- capability catalog endpoints;
-- harness capability inventory;
-- explicitly approved model-free, safe/read-only harness actions.
+- `health`;
+- `runtime-summary`;
+- `skills-catalog`;
+- `plugins-catalog`.
+
+All four use HTTP `GET` and are classified model-free, safe, and read-only. `capability-catalog` is intentionally excluded because WhiteShadow may refresh local snapshot files while serving it when its cache is absent or invalid.
 
 The adapter must reject:
 
@@ -355,7 +356,7 @@ Public defaults belong in `.env.example`:
 
 ```dotenv
 ORCHESTRATOR_HOST=127.0.0.1
-ORCHESTRATOR_PORT=4310
+ORCHESTRATOR_PORT=8790
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:4b
 WHITESHADOW_BASE_URL=http://127.0.0.1:8787

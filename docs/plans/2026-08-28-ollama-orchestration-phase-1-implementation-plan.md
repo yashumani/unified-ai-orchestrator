@@ -121,9 +121,9 @@ git diff --check
 - Atomic create/replace with expected-hash preconditions.
 - Exact text replacement with expected occurrence count.
 - Repository-relative directory creation.
-- Root `package.json` script execution through `execFile`, never a shell.
-- Fixed npm script allowlist from the design.
-- Bounded stdout/stderr summaries with timeouts.
+- Fixed built-in `check:public-boundary` and `typecheck` execution through direct Node executable vectors, never a shell or mutable package-script body.
+- Credential-free child environment and cancellation/timeout propagation.
+- Hash/count-only stdout and stderr summaries; raw process output is not returned to the model.
 - No Git mutation tool and no arbitrary process tool.
 
 ### Gate
@@ -149,6 +149,8 @@ npm run verify
 - Health and model-inventory probes.
 - Reject configured models other than exact `qwen3:4b`.
 - `POST /api/chat` with streaming, tools, `think: false`, 4096 context, and temperature 0.2.
+- Two schema-constrained stages when tools are offered: select one offered tool or a final response, then generate arguments under the selected tool's schema.
+- Ignore speculative response text attached to a tool decision and reject unoffered names, inconsistent decisions, malformed JSON, and non-object arguments.
 - Incremental NDJSON parsing across arbitrary byte boundaries.
 - Normalize content, thinking, tool calls, completion metadata, aborts, and API errors.
 - Never log prompts or response bodies from the transport layer.
@@ -175,8 +177,8 @@ npm run typecheck
 ### Behavior
 
 - Build the fixed system boundary and typed tool catalog.
-- Stream text and tool lifecycle events.
-- Validate tool calls, ask the policy engine, and execute serially.
+- Stream validated final-response text and tool lifecycle events.
+- Revalidate generated arguments against the fixed repository schema, ask the policy engine, and execute serially.
 - Continue with normalized tool results until final text.
 - Enforce iteration, tool-count, cancellation, and timeout limits.
 - Produce immutable evidence for completed, stopped, failed, and cancelled runs.
@@ -210,7 +212,8 @@ npm run verify
 - Start WhiteShadow from the configured D workspace and its existing `.venv` Python.
 - Collapse concurrent starts and use bounded readiness polling.
 - Return truthful offline, starting, ready, degraded, and blocked states.
-- WhiteShadow adapter exposes status, catalogs, and safe model-free capabilities only.
+- WhiteShadow adapter exposes exactly four model-free `GET` capabilities: `health`, `runtime-summary`, `skills-catalog`, and `plugins-catalog`.
+- `capability-catalog` remains blocked because serving it can conditionally refresh WhiteShadow snapshot files.
 - Fail closed when risk or model-use classification is missing.
 
 ### Gate
@@ -293,7 +296,7 @@ npm run build
 ### Fixture verification
 
 ```powershell
-npm install
+npm ci --ignore-scripts
 npm run verify
 npm run ingest:fixture
 npm run verify
