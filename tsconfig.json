@@ -5,6 +5,21 @@
       "path": "./packages/contracts"
     },
     {
+      "path": "./packages/policy-engine"
+    },
+    {
+      "path": "./packages/repository-tools"
+    },
+    {
+      "path": "./packages/ollama-client"
+    },
+    {
+      "path": "./packages/runtime-manager"
+    },
+    {
+      "path": "./packages/whiteshadow-client"
+    },
+    {
       "path": "./services/evidence-index"
     },
     {

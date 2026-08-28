@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentRunReceiptSchema,
   ClaimRecordSchema,
   ConversationSnapshotSchema,
   EvidenceEnvelopeSchema,
+  PINNED_OLLAMA_MODEL,
+  PolicyDecisionSchema,
   SCHEMA_VERSION,
   SourceReferenceSchema
 } from "./index.js";
@@ -97,6 +100,39 @@ describe("provenance contracts", () => {
         source,
         payload: {},
         secret: "must-not-pass"
+      })
+    ).toThrow();
+  });
+});
+
+describe("orchestration contracts", () => {
+  it("pins the Phase 1 Ollama model", () => {
+    expect(PINNED_OLLAMA_MODEL).toBe("qwen3:4b");
+  });
+
+  it("rejects a policy decision whose boolean and code disagree", () => {
+    expect(() =>
+      PolicyDecisionSchema.parse({
+        allowed: true,
+        code: "protected_branch",
+        reason: "main is protected",
+        checkedAt: "2026-08-28T05:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("rejects receipts beyond the fixed iteration limit", () => {
+    expect(() =>
+      AgentRunReceiptSchema.parse({
+        schemaVersion: SCHEMA_VERSION,
+        runId: "run-001",
+        status: "succeeded",
+        model: PINNED_OLLAMA_MODEL,
+        startedAt: "2026-08-28T05:00:00.000Z",
+        completedAt: "2026-08-28T05:01:00.000Z",
+        iterations: 9,
+        toolCalls: [],
+        inputObjectSha256: sha
       })
     ).toThrow();
   });

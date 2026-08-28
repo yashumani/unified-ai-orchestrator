@@ -8,11 +8,14 @@
     "node": ">=22"
   },
   "workspaces": [
+    "apps/*",
     "packages/*",
     "services/*"
   ],
   "scripts": {
     "build": "tsc -b --pretty false",
+    "dev": "npm --workspace @unified-ai/api run dev",
+    "start": "npm --workspace @unified-ai/api run start",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "check:public-boundary": "node scripts/check-public-boundary.mjs",
