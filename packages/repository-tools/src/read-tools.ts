@@ -150,7 +150,50 @@ export async function getGitStatus(repositoryRoot: string): Promise<{
   content: string;
   truncated: boolean;
 }> {
-  return bounded(await git(repositoryRoot, ["status", "--short", "--branch"]));
+  const branch = await git(repositoryRoot, [
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "HEAD"
+  ]);
+  const raw = await git(repositoryRoot, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all"
+  ]);
+  const fields = raw.split("\0").filter((field) => field.length > 0);
+  const entries: string[] = [];
+  let protectedEntryOmitted = false;
+
+  for (let index = 0; index < fields.length; index += 1) {
+    const record = fields[index] as string;
+    const status = record.slice(0, 2);
+    const path = record.slice(3);
+    const renamed = status.includes("R") || status.includes("C");
+    const previousPath = renamed ? fields[index + 1] : undefined;
+    if (renamed) {
+      index += 1;
+    }
+    try {
+      const safePath = assertPublicPath(path);
+      const safePrevious =
+        previousPath === undefined ? undefined : assertPublicPath(previousPath);
+      entries.push(
+        safePrevious === undefined
+          ? `${status} ${JSON.stringify(safePath)}`
+          : `${status} ${JSON.stringify(safePath)} <- ${JSON.stringify(safePrevious)}`
+      );
+    } catch {
+      protectedEntryOmitted = true;
+    }
+  }
+
+  const lines = [`## ${branch.trim()}`, ...entries];
+  if (protectedEntryOmitted) {
+    lines.push("[protected repository entries omitted]");
+  }
+  return bounded(lines.join("\n"));
 }
 
 export async function getGitDiff(
@@ -160,6 +203,46 @@ export async function getGitDiff(
   const args = ["diff", "--no-ext-diff", "--no-textconv"];
   if (relativePath !== undefined) {
     args.push("--", assertPublicPath(relativePath));
+    return bounded(await git(repositoryRoot, args));
   }
-  return bounded(await git(repositoryRoot, args));
+
+  const changed = (await git(repositoryRoot, [
+    "diff",
+    "--name-only",
+    "-z",
+    "--no-ext-diff"
+  ]))
+    .split("\0")
+    .filter(Boolean);
+  const publicPaths: string[] = [];
+  let protectedEntryOmitted = false;
+  for (const path of changed) {
+    try {
+      publicPaths.push(assertPublicPath(path));
+    } catch {
+      protectedEntryOmitted = true;
+    }
+  }
+
+  const pieces: string[] = [];
+  let truncated = publicPaths.length > 200;
+  for (const path of publicPaths.slice(0, 200)) {
+    const piece = await git(repositoryRoot, [
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--",
+      path
+    ]);
+    pieces.push(piece);
+    if (pieces.join("").length > MAX_COMMAND_OUTPUT) {
+      truncated = true;
+      break;
+    }
+  }
+  if (protectedEntryOmitted) {
+    pieces.push("\n[protected repository diffs omitted]\n");
+  }
+  const result = bounded(pieces.join(""));
+  return { content: result.content, truncated: result.truncated || truncated };
 }

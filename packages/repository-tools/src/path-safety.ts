@@ -79,49 +79,59 @@ export function assertPublicPath(relativePath: string): string {
   return normalized;
 }
 
-async function nearestExistingPath(candidate: string, root: string): Promise<string> {
-  let current = candidate;
-  while (isContained(root, current)) {
-    try {
-      await lstat(current);
-      return current;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
-    const parent = resolve(current, "..");
-    if (parent === current) {
-      break;
-    }
-    current = parent;
-  }
-  return root;
-}
-
 export async function resolveSafeRepositoryPath(
   repositoryRoot: string,
   relativePath: string
 ): Promise<{ repositoryRoot: string; relativePath: string; absolutePath: string }> {
   const canonicalRoot = await realpath(resolve(repositoryRoot));
   const normalized = assertPublicPath(relativePath);
-  const candidate = resolve(canonicalRoot, ...normalized.split("/"));
+  const segments = normalized.split("/");
+  const candidate = resolve(canonicalRoot, ...segments);
   if (!isContained(canonicalRoot, candidate)) {
     throw new RepositoryPathError("path_escape", "path escapes the repository root");
   }
 
-  const existing = await nearestExistingPath(candidate, canonicalRoot);
-  const canonicalExisting = await realpath(existing);
-  if (!isContained(canonicalRoot, canonicalExisting)) {
-    throw new RepositoryPathError(
-      "symlink_escape",
-      "resolved path escapes through a symlink or junction"
-    );
+  let current = canonicalRoot;
+  let absolutePath = candidate;
+  for (const [index, segment] of segments.entries()) {
+    const next = resolve(current, segment);
+    let status;
+    try {
+      status = await lstat(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        absolutePath = resolve(current, ...segments.slice(index));
+        break;
+      }
+      throw error;
+    }
+
+    if (status.isSymbolicLink()) {
+      throw new RepositoryPathError(
+        "symlink_escape",
+        "repository tools cannot traverse a symlink or junction"
+      );
+    }
+    const canonicalExisting = await realpath(next);
+    if (!isContained(canonicalRoot, canonicalExisting)) {
+      throw new RepositoryPathError(
+        "symlink_escape",
+        "resolved path escapes through a symlink or junction"
+      );
+    }
+    if (index < segments.length - 1 && !status.isDirectory()) {
+      throw new RepositoryPathError(
+        "path_escape",
+        "a non-directory component appears before the requested target"
+      );
+    }
+    current = canonicalExisting;
+    absolutePath = canonicalExisting;
   }
 
   return {
     repositoryRoot: canonicalRoot,
     relativePath: normalized,
-    absolutePath: candidate
+    absolutePath
   };
 }

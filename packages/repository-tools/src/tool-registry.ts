@@ -54,15 +54,128 @@ const directoryInput = z.object({ path: z.string().min(1) }).strict();
 const npmInput = z.object({ script: z.string().min(1) }).strict();
 
 const definitions: ToolDefinition[] = [
-  { name: "repository.list_files", description: "List tracked public repository files.", mode: "read", inputSchema: { type: "object" } },
-  { name: "repository.read_file", description: "Read a bounded chunk of one public text file.", mode: "read", inputSchema: { type: "object", required: ["path"] } },
-  { name: "repository.search", description: "Search bounded public repository text.", mode: "read", inputSchema: { type: "object", required: ["query"] } },
-  { name: "repository.git_status", description: "Read repository Git status.", mode: "read", inputSchema: { type: "object" } },
-  { name: "repository.git_diff", description: "Read the unstaged Git diff.", mode: "read", inputSchema: { type: "object" } },
-  { name: "repository.write_file", description: "Create or precondition-replace a public text file.", mode: "write", inputSchema: { type: "object", required: ["path", "content"] } },
-  { name: "repository.replace_text", description: "Replace exact text with hash and occurrence preconditions.", mode: "write", inputSchema: { type: "object", required: ["path", "search", "replacement", "expectedOccurrences", "expectedSha256"] } },
-  { name: "repository.create_directory", description: "Create a public repository directory.", mode: "write", inputSchema: { type: "object", required: ["path"] } },
-  { name: "repository.run_npm_script", description: "Run one fixed allowlisted root npm script.", mode: "write", inputSchema: { type: "object", required: ["script"] } }
+  {
+    name: "repository.list_files",
+    description: "List tracked public repository files with an optional path prefix.",
+    mode: "read",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prefix: { type: "string", description: "Optional repository-relative directory prefix." },
+        limit: { type: "integer", minimum: 1, maximum: 2_000, default: 500 }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.read_file",
+    description: "Read a bounded line chunk from one public UTF-8 repository file.",
+    mode: "read",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Repository-relative public file path." },
+        startLine: { type: "integer", minimum: 1, default: 1 },
+        lineCount: { type: "integer", minimum: 1, maximum: 1_000, default: 200 }
+      },
+      required: ["path"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.search",
+    description: "Search bounded public repository text for a literal query.",
+    mode: "read",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1, maxLength: 1_000 },
+        limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+        caseSensitive: { type: "boolean", default: false }
+      },
+      required: ["query"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.git_status",
+    description: "Read repository Git branch and working-tree status without mutation.",
+    mode: "read",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "repository.git_diff",
+    description: "Read the unstaged Git diff, optionally limited to one public path.",
+    mode: "read",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string", description: "Optional public repository-relative path." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.write_file",
+    description: "Create a public text file, or replace one only with its current SHA-256 precondition.",
+    mode: "write",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string", maxLength: 1_000_000 },
+        expectedSha256: {
+          type: "string",
+          pattern: "^[a-f0-9]{64}$",
+          description: "Required when the target already exists."
+        }
+      },
+      required: ["path", "content"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.replace_text",
+    description: "Replace exact text with current-file SHA-256 and exact occurrence-count preconditions.",
+    mode: "write",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        search: { type: "string", minLength: 1 },
+        replacement: { type: "string" },
+        expectedOccurrences: { type: "integer", minimum: 1 },
+        expectedSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }
+      },
+      required: ["path", "search", "replacement", "expectedOccurrences", "expectedSha256"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.create_directory",
+    description: "Create a public repository directory after policy and path validation.",
+    mode: "write",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "repository.run_npm_script",
+    description: "Run one fixed allowlisted root npm script without arbitrary arguments.",
+    mode: "write",
+    inputSchema: {
+      type: "object",
+      properties: {
+        script: {
+          type: "string",
+          enum: ["check:public-boundary", "typecheck", "test", "build", "verify", "ingest:fixture"]
+        }
+      },
+      required: ["script"],
+      additionalProperties: false
+    }
+  }
 ];
 
 const mutatingTools = new Set<RepositoryToolName>(
@@ -84,7 +197,10 @@ export class RepositoryToolRegistry {
   }
 
   listDefinitions(): ToolDefinition[] {
-    return definitions.map((definition) => ({ ...definition, inputSchema: { ...definition.inputSchema } }));
+    return definitions.map((definition) => ({
+      ...definition,
+      inputSchema: structuredClone(definition.inputSchema)
+    }));
   }
 
   async execute(rawCall: ToolCall): Promise<ToolResult> {

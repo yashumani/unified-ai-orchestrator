@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertPublicPath } from "./path-safety.js";
-import { readRepositoryFile } from "./read-tools.js";
+import { getGitDiff, getGitStatus, readRepositoryFile } from "./read-tools.js";
 import { RepositoryToolRegistry } from "./tool-registry.js";
 import { writeRepositoryFile } from "./write-tools.js";
 
@@ -59,6 +59,34 @@ describe("repository reads and writes", () => {
       expectedSha256
     });
     expect(await readFile(join(root, "README.md"), "utf8")).toBe("changed\n");
+  });
+
+  it("omits protected tracked content from status and whole-repository diff", async () => {
+    const root = await fixtureRepository();
+    await writeFile(join(root, ".env"), "SECRET_VALUE=first\n", "utf8");
+    await execFileAsync("git", ["-C", root, "add", "-f", ".env"], { windowsHide: true });
+    await writeFile(join(root, ".env"), "SECRET_VALUE=must-not-leak\n", "utf8");
+    await writeFile(join(root, "README.md"), "public change\n", "utf8");
+
+    const status = await getGitStatus(root);
+    const diff = await getGitDiff(root);
+    expect(status.content).not.toContain(".env");
+    expect(status.content).not.toContain("must-not-leak");
+    expect(diff.content).not.toContain(".env");
+    expect(diff.content).not.toContain("must-not-leak");
+    expect(diff.content).toContain("public change");
+  });
+
+  it("does not follow a public-looking junction into a protected directory", async () => {
+    const root = await fixtureRepository();
+    const protectedDirectory = join(root, ".local", "private");
+    await mkdir(protectedDirectory, { recursive: true });
+    await writeFile(join(protectedDirectory, "secret.txt"), "must-not-leak", "utf8");
+    await symlink(protectedDirectory, join(root, "public-link"), "junction");
+
+    await expect(readRepositoryFile(root, "public-link/secret.txt")).rejects.toThrow(
+      /symlink|junction/u
+    );
   });
 });
 

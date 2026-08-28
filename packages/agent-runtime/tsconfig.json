@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../contracts"
+    },
+    {
+      "path": "../ollama-client"
+    },
+    {
+      "path": "../repository-tools"
+    },
+    {
+      "path": "../../services/evidence-index"
+    }
+  ]
+}

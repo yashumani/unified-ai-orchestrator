@@ -1,12 +1,16 @@
 import {
+  AgentRunReceiptSchema,
   EvidenceReceiptSchema,
   Sha256Schema,
+  StableIdSchema,
+  type AgentRunReceipt,
   type EvidenceReceipt
 } from "@unified-ai/contracts";
 import { randomUUID } from "node:crypto";
 import {
   access,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -25,6 +29,9 @@ export interface StoredObject {
   sha256: string;
   relativePath: string;
 }
+
+const DEFAULT_AGENT_RUN_RECEIPT_LIMIT = 20;
+const MAX_AGENT_RUN_RECEIPT_LIMIT = 100;
 
 function isContained(root: string, candidate: string): boolean {
   const pathFromRoot = relative(root, candidate);
@@ -132,6 +139,122 @@ export class LocalEvidenceStore {
       sha256: sha256Hex(canonical),
       relativePath: relative(root, target).replaceAll("\\", "/")
     };
+  }
+
+  async putAgentRunReceipt(receipt: AgentRunReceipt): Promise<StoredObject> {
+    const parsed = AgentRunReceiptSchema.parse(receipt);
+    const runId = StableIdSchema.parse(parsed.runId);
+    const canonical = canonicalJson(parsed);
+    const sha256 = sha256Hex(canonical);
+    const root = await this.#rootPath();
+    const target = resolveWithinRoot(root, "agent-runs", `${runId}.json`);
+    const checksumTarget = resolveWithinRoot(
+      root,
+      "agent-runs",
+      `${runId}.sha256`
+    );
+
+    await this.#writeImmutable(target, canonical);
+    await this.#writeImmutable(checksumTarget, sha256);
+
+    return {
+      sha256,
+      relativePath: relative(root, target).replaceAll("\\", "/")
+    };
+  }
+
+  async readAgentRunReceipt(runId: string): Promise<AgentRunReceipt> {
+    const parsedRunId = StableIdSchema.parse(runId);
+    const root = await this.#rootPath();
+    const target = resolveWithinRoot(root, "agent-runs", `${parsedRunId}.json`);
+    const checksumTarget = resolveWithinRoot(
+      root,
+      "agent-runs",
+      `${parsedRunId}.sha256`
+    );
+    const realTarget = await realpath(target);
+    const realChecksumTarget = await realpath(checksumTarget);
+    this.#assertContained(realTarget);
+    this.#assertContained(realChecksumTarget);
+
+    const content = await readFile(realTarget, "utf8");
+    const expectedSha256 = Sha256Schema.parse(
+      await readFile(realChecksumTarget, "utf8")
+    );
+    if (sha256Hex(content) !== expectedSha256) {
+      throw new Error(
+        "agent run receipt failed its content-addressed integrity check"
+      );
+    }
+
+    const receipt = AgentRunReceiptSchema.parse(JSON.parse(content) as unknown);
+    if (receipt.runId !== parsedRunId) {
+      throw new Error("agent run receipt failed its path identity integrity check");
+    }
+
+    const canonical = canonicalJson(receipt);
+    if (sha256Hex(content) !== sha256Hex(canonical)) {
+      throw new Error("agent run receipt failed its canonical integrity check");
+    }
+
+    return receipt;
+  }
+
+  async listAgentRunReceipts(
+    limit = DEFAULT_AGENT_RUN_RECEIPT_LIMIT
+  ): Promise<AgentRunReceipt[]> {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_AGENT_RUN_RECEIPT_LIMIT
+    ) {
+      throw new Error(
+        `agent run receipt limit must be an integer from 1 to ${MAX_AGENT_RUN_RECEIPT_LIMIT}`
+      );
+    }
+
+    const root = await this.#rootPath();
+    const directory = resolveWithinRoot(root, "agent-runs");
+    let entries;
+    try {
+      const realDirectory = await realpath(directory);
+      this.#assertContained(realDirectory);
+      entries = await readdir(realDirectory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+
+    const receipts: AgentRunReceipt[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const runId = entry.name.slice(0, -".json".length);
+      if (!StableIdSchema.safeParse(runId).success) {
+        continue;
+      }
+
+      try {
+        receipts.push(await this.readAgentRunReceipt(runId));
+      } catch {
+        // Listing is a safe summary surface: malformed or tampered entries are omitted.
+      }
+    }
+
+    return receipts
+      .sort((first, second) => {
+        const completionOrder =
+          Date.parse(second.completedAt) - Date.parse(first.completedAt);
+        if (completionOrder !== 0) {
+          return completionOrder;
+        }
+        return second.runId.localeCompare(first.runId);
+      })
+      .slice(0, limit);
   }
 
   async #rootPath(): Promise<string> {

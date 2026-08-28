@@ -20,6 +20,9 @@
       "path": "./packages/whiteshadow-client"
     },
     {
+      "path": "./packages/agent-runtime"
+    },
+    {
       "path": "./services/evidence-index"
     },
     {

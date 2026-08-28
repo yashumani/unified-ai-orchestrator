@@ -1,6 +1,9 @@
 import {
+  AgentRunReceiptSchema,
   EvidenceReceiptSchema,
+  PINNED_OLLAMA_MODEL,
   SCHEMA_VERSION,
+  type AgentRunReceipt,
   type EvidenceReceipt
 } from "@unified-ai/contracts";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -35,6 +38,27 @@ async function makeStore(): Promise<{
       repositoryRoot
     })
   };
+}
+
+function makeAgentRunReceipt(
+  runId: string,
+  completedAt: string,
+  overrides: Partial<AgentRunReceipt> = {}
+): AgentRunReceipt {
+  return AgentRunReceiptSchema.parse({
+    schemaVersion: SCHEMA_VERSION,
+    runId,
+    status: "succeeded",
+    model: PINNED_OLLAMA_MODEL,
+    startedAt: completedAt,
+    completedAt,
+    iterations: 1,
+    toolCalls: [],
+    inputObjectSha256: "a".repeat(64),
+    outputObjectSha256: "b".repeat(64),
+    warnings: [],
+    ...overrides
+  });
 }
 
 afterEach(async () => {
@@ -143,5 +167,125 @@ describe("local evidence store", () => {
         warnings: ["different"]
       })
     ).rejects.toThrow(/immutable/u);
+  });
+
+  it("round-trips a validated agent run receipt", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const receipt = makeAgentRunReceipt(
+      "run-round-trip",
+      "2026-08-28T01:00:00.000Z"
+    );
+
+    const stored = await store.putAgentRunReceipt(receipt);
+
+    expect(stored.relativePath).toBe("agent-runs/run-round-trip.json");
+    expect(await store.readAgentRunReceipt(receipt.runId)).toEqual(receipt);
+
+    const target = join(repositoryRoot, ".local", "evidence", stored.relativePath);
+    expect(await readFile(target, "utf8")).toBe(canonicalJson(receipt));
+  });
+
+  it("detects valid-schema tampering in an agent run receipt", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const receipt = makeAgentRunReceipt(
+      "run-tampered",
+      "2026-08-28T01:00:00.000Z"
+    );
+    const stored = await store.putAgentRunReceipt(receipt);
+    const target = join(repositoryRoot, ".local", "evidence", stored.relativePath);
+
+    await writeFile(
+      target,
+      canonicalJson({ ...receipt, warnings: ["tampered after persistence"] }),
+      "utf8"
+    );
+
+    await expect(store.readAgentRunReceipt(receipt.runId)).rejects.toThrow(
+      /content-addressed integrity/u
+    );
+  });
+
+  it("refuses conflicting reuse of an immutable agent run id", async () => {
+    const { store } = await makeStore();
+    const receipt = makeAgentRunReceipt(
+      "run-conflict",
+      "2026-08-28T01:00:00.000Z"
+    );
+
+    const first = await store.putAgentRunReceipt(receipt);
+    const second = await store.putAgentRunReceipt(receipt);
+    expect(second).toEqual(first);
+
+    await expect(
+      store.putAgentRunReceipt({
+        ...receipt,
+        warnings: ["different immutable content"]
+      })
+    ).rejects.toThrow(/immutable/u);
+    expect(await store.readAgentRunReceipt(receipt.runId)).toEqual(receipt);
+  });
+
+  it("rejects traversal-like agent run ids before resolving a path", async () => {
+    const { store } = await makeStore();
+
+    await expect(store.readAgentRunReceipt("../escape")).rejects.toThrow();
+    await expect(
+      store.putAgentRunReceipt({
+        ...makeAgentRunReceipt("run-safe", "2026-08-28T01:00:00.000Z"),
+        runId: "../escape"
+      } as AgentRunReceipt)
+    ).rejects.toThrow();
+  });
+
+  it("lists validated agent run receipts newest-first with a hard limit", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    expect(await store.listAgentRunReceipts()).toEqual([]);
+
+    const oldest = makeAgentRunReceipt(
+      "run-oldest",
+      "2026-08-28T01:00:00.000Z"
+    );
+    const newest = makeAgentRunReceipt(
+      "run-newest",
+      "2026-08-28T03:00:00.000Z"
+    );
+    const middle = makeAgentRunReceipt(
+      "run-middle",
+      "2026-08-28T02:00:00.000Z"
+    );
+
+    await store.putAgentRunReceipt(oldest);
+    await store.putAgentRunReceipt(newest);
+    await store.putAgentRunReceipt(middle);
+
+    const agentRunRoot = join(
+      repositoryRoot,
+      ".local",
+      "evidence",
+      "agent-runs"
+    );
+    await writeFile(join(agentRunRoot, "notes.txt"), "ignore me", "utf8");
+    await writeFile(join(agentRunRoot, "invalid.json"), "not-json", "utf8");
+    await writeFile(
+      join(agentRunRoot, "payload-bearing.json"),
+      JSON.stringify({
+        ...middle,
+        runId: "payload-bearing",
+        prompt: "must never be exposed",
+        toolPayload: { privateValue: "must never be exposed" }
+      }),
+      "utf8"
+    );
+
+    await expect(store.listAgentRunReceipts(0)).rejects.toThrow(/limit/u);
+    await expect(store.listAgentRunReceipts(101)).rejects.toThrow(/limit/u);
+    await expect(store.listAgentRunReceipts(1.5)).rejects.toThrow(/limit/u);
+
+    const receipts = await store.listAgentRunReceipts(2);
+    expect(receipts).toEqual([newest, middle]);
+    expect(receipts).toHaveLength(2);
+    expect(receipts.every((receipt) => AgentRunReceiptSchema.safeParse(receipt).success)).toBe(
+      true
+    );
   });
 });
