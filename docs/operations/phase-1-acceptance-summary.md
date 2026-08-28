@@ -13,10 +13,10 @@ The accepted boundary excludes protected branches, production resources, other r
 ## Verification record
 
 - Clean dependency installation added 1,068 packages and audited 1,080 packages in 44 minutes.
-- Two complete `npm run verify` executions exited successfully after the final runtime and fixture changes.
-- The final suite passed 24 test files and 218 tests.
-- The production web build transformed 9,152 modules; the final build completed in 57.11 seconds with non-blocking chunk-size warnings.
-- Both complete verification runs passed the public-boundary gate for 124 commit-candidate files. The closure check passed for 125 files after adding this summary.
+- Three complete `npm run verify` executions exited successfully: two after the final runtime and fixture changes, and one after the implementation and acceptance commits.
+- The post-commit suite passed 24 test files and 218 tests in 219.13 seconds.
+- The post-commit production web build transformed 9,152 modules and completed in 1 minute 53 seconds with non-blocking chunk-size warnings.
+- The first two complete verification runs passed the public-boundary gate for 124 commit-candidate files. The closure and post-commit checks passed for 125 files after adding this summary.
 - `git diff --check` passed.
 - Final runtime probes returned API health `ok`, Ollama `ready`, WhiteShadow `ready`, the exact model `qwen3:4b`, and HTTP 200 from the production web preview.
 
