@@ -23,6 +23,7 @@
     "check:public-boundary": "node scripts/check-public-boundary.mjs",
     "ingest:fixture": "npm --workspace @unified-ai/session-ingestion run ingest:fixture",
     "portfolio:acceptance": "tsx scripts/portfolio-live-acceptance.ts",
+    "dashboard:acceptance": "tsx scripts/dashboard-builder-live-acceptance.ts --local",
     "verify": "npm run check:public-boundary && npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
