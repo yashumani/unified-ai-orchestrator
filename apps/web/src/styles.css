@@ -1787,6 +1787,10 @@ summary {
   margin-top: 15px;
 }
 
+.evidence-columns > div {
+  min-width: 0;
+}
+
 .evidence-columns > div + div {
   padding-left: 22px;
   border-left: 1px solid var(--line);
@@ -1799,15 +1803,23 @@ summary {
 .evidence-list,
 .contradiction-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
 .evidence-list li,
 .contradiction-list li {
   display: grid;
+  min-width: 0;
   padding: 10px;
   background: var(--flight-paper);
   border-left: 3px solid var(--instrument-cyan);
+}
+
+.evidence-list li > *,
+.contradiction-list li > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .evidence-list li > span {
@@ -2128,7 +2140,7 @@ summary {
   .override-form,
   .evidence-columns,
   .portfolio-import form {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .portfolio-hero__actions .primary-button,
