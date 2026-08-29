@@ -23,7 +23,7 @@ const PROHIBITED_KEYS = new Set([
   "typescript",
   "wasm"
 ]);
-const PROHIBITED_VALUE = /(?:<script\b|javascript:|data:(?:application|image)\/|^UEsDB)/iu;
+const PROHIBITED_VALUE = /(?:<\/?[A-Za-z][^>]*>|(?:javascript|data):|^UEsDB)/iu;
 const PUBLISH_BLOCKING_WARNINGS = new Set([
   "external-license-review-required",
   "layout-overlap",

@@ -123,6 +123,31 @@ describe("dashboard manifest semantic validation", () => {
     );
   });
 
+  it.each([
+    ["HTML-like markup", "<section>embedded markup</section>"],
+    ["data URLs", "data:text/html;base64,PHNjcmlwdD4="]
+  ])("rejects %s even in otherwise valid text fields", async (_label, description) => {
+    const manifest = await sample();
+    const result = validateDashboardManifest({
+      ...manifest,
+      template: {
+        ...manifest.template,
+        description
+      }
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.normalizedManifest).toBeNull();
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "executable-content-prohibited",
+          path: "/template/description"
+        })
+      ])
+    );
+  });
+
   it("requires the separately gated Qlik adapter for Qlik calculations", async () => {
     const manifest = await sample();
     const result = validateDashboardManifest({
