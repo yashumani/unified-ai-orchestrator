@@ -12,6 +12,14 @@ import {
   type PortfolioRunCheckpoint,
   type RecommendationDecisionEvent
 } from "@unified-ai/contracts";
+import {
+  DashboardBuildReceiptSchema,
+  DashboardImportReceiptSchema,
+  DashboardTemplateEventSchema,
+  type DashboardBuildReceipt,
+  type DashboardImportReceipt,
+  type DashboardTemplateEvent
+} from "@unified-ai/contracts/dashboard-builder";
 import { randomUUID } from "node:crypto";
 import {
   link,
@@ -503,6 +511,178 @@ export class LocalEvidenceStore {
       .slice(0, limit);
   }
 
+  async putDashboardTemplateEvent(
+    event: DashboardTemplateEvent
+  ): Promise<StoredObject> {
+    const parsed = DashboardTemplateEventSchema.parse(event);
+    const templateId = StableIdSchema.parse(parsed.templateId);
+    const eventId = StableIdSchema.parse(parsed.eventId);
+    return this.#putChecksummedRecord(
+      ["dashboard-templates", templateId, "events"],
+      eventId,
+      parsed
+    );
+  }
+
+  async readDashboardTemplateEvent(
+    templateId: string,
+    eventId: string
+  ): Promise<DashboardTemplateEvent> {
+    const parsedTemplateId = StableIdSchema.parse(templateId);
+    const parsedEventId = StableIdSchema.parse(eventId);
+    return this.#readChecksummedRecord(
+      ["dashboard-templates", parsedTemplateId, "events"],
+      parsedEventId,
+      (value) => DashboardTemplateEventSchema.parse(value),
+      (event) => {
+        if (
+          event.templateId !== parsedTemplateId ||
+          event.eventId !== parsedEventId
+        ) {
+          throw new Error(
+            "dashboard template event failed its path identity integrity check"
+          );
+        }
+      },
+      "dashboard template event"
+    );
+  }
+
+  async listDashboardTemplateEvents(
+    templateId: string
+  ): Promise<DashboardTemplateEvent[]> {
+    const parsedTemplateId = StableIdSchema.parse(templateId);
+    const ids = await this.#listStrictRecordIds(
+      ["dashboard-templates", parsedTemplateId, "events"],
+      "dashboard template event"
+    );
+    const events = await Promise.all(
+      ids.map((eventId) =>
+        this.readDashboardTemplateEvent(parsedTemplateId, eventId)
+      )
+    );
+    return events.sort((left, right) => {
+      const sequenceOrder = left.sequence - right.sequence;
+      return sequenceOrder !== 0
+        ? sequenceOrder
+        : left.eventId.localeCompare(right.eventId);
+    });
+  }
+
+  async putDashboardBuildReceipt(
+    receipt: DashboardBuildReceipt
+  ): Promise<StoredObject> {
+    const parsed = DashboardBuildReceiptSchema.parse(receipt);
+    return this.#putChecksummedRecord(
+      ["dashboard-builds"],
+      StableIdSchema.parse(parsed.buildId),
+      parsed
+    );
+  }
+
+  async readDashboardBuildReceipt(
+    buildId: string
+  ): Promise<DashboardBuildReceipt> {
+    const parsedBuildId = StableIdSchema.parse(buildId);
+    return this.#readChecksummedRecord(
+      ["dashboard-builds"],
+      parsedBuildId,
+      (value) => DashboardBuildReceiptSchema.parse(value),
+      (receipt) => {
+        if (receipt.buildId !== parsedBuildId) {
+          throw new Error(
+            "dashboard build receipt failed its path identity integrity check"
+          );
+        }
+      },
+      "dashboard build receipt"
+    );
+  }
+
+  async listDashboardBuildReceipts(
+    templateId?: string
+  ): Promise<DashboardBuildReceipt[]> {
+    const parsedTemplateId =
+      templateId === undefined ? undefined : StableIdSchema.parse(templateId);
+    const ids = await this.#listStrictRecordIds(
+      ["dashboard-builds"],
+      "dashboard build receipt"
+    );
+    const receipts = await Promise.all(
+      ids.map((buildId) => this.readDashboardBuildReceipt(buildId))
+    );
+    return receipts
+      .filter(
+        (receipt) =>
+          parsedTemplateId === undefined ||
+          receipt.templateId === parsedTemplateId
+      )
+      .sort((left, right) => {
+        const completedOrder =
+          Date.parse(left.completedAt) - Date.parse(right.completedAt);
+        return completedOrder !== 0
+          ? completedOrder
+          : left.buildId.localeCompare(right.buildId);
+      });
+  }
+
+  async putDashboardImportReceipt(
+    receipt: DashboardImportReceipt
+  ): Promise<StoredObject> {
+    const parsed = DashboardImportReceiptSchema.parse(receipt);
+    return this.#putChecksummedRecord(
+      ["dashboard-imports"],
+      StableIdSchema.parse(parsed.importId),
+      parsed
+    );
+  }
+
+  async readDashboardImportReceipt(
+    importId: string
+  ): Promise<DashboardImportReceipt> {
+    const parsedImportId = StableIdSchema.parse(importId);
+    return this.#readChecksummedRecord(
+      ["dashboard-imports"],
+      parsedImportId,
+      (value) => DashboardImportReceiptSchema.parse(value),
+      (receipt) => {
+        if (receipt.importId !== parsedImportId) {
+          throw new Error(
+            "dashboard import receipt failed its path identity integrity check"
+          );
+        }
+      },
+      "dashboard import receipt"
+    );
+  }
+
+  async listDashboardImportReceipts(
+    templateId?: string
+  ): Promise<DashboardImportReceipt[]> {
+    const parsedTemplateId =
+      templateId === undefined ? undefined : StableIdSchema.parse(templateId);
+    const ids = await this.#listStrictRecordIds(
+      ["dashboard-imports"],
+      "dashboard import receipt"
+    );
+    const receipts = await Promise.all(
+      ids.map((importId) => this.readDashboardImportReceipt(importId))
+    );
+    return receipts
+      .filter(
+        (receipt) =>
+          parsedTemplateId === undefined ||
+          receipt.templateId === parsedTemplateId
+      )
+      .sort((left, right) => {
+        const occurredOrder =
+          Date.parse(left.occurredAt) - Date.parse(right.occurredAt);
+        return occurredOrder !== 0
+          ? occurredOrder
+          : left.importId.localeCompare(right.importId);
+      });
+  }
+
   async #rootPath(): Promise<string> {
     await this.initialize();
     return this.#realRoot as string;
@@ -631,6 +811,50 @@ export class LocalEvidenceStore {
       if (StableIdSchema.safeParse(id).success) {
         ids.push(id);
       }
+    }
+    return ids;
+  }
+
+  async #listStrictRecordIds(
+    directorySegments: readonly string[],
+    label: string
+  ): Promise<string[]> {
+    const root = await this.#rootPath();
+    const directory = resolveWithinRoot(root, ...directorySegments);
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} directory cannot be a symbolic link or junction`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`${label} path must be a directory`);
+    }
+    const realDirectory = await realpath(directory);
+    this.#assertContained(realDirectory);
+    const entries = await readdir(realDirectory, { withFileTypes: true });
+    const ids: string[] = [];
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        throw new Error(`${label} cannot be a symbolic link or junction`);
+      }
+      if (!entry.name.endsWith(".json")) {
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(`${label} must be a regular file`);
+      }
+      const id = entry.name.slice(0, -".json".length);
+      if (!StableIdSchema.safeParse(id).success) {
+        throw new Error(`${label} history contains an invalid record identifier`);
+      }
+      ids.push(id);
     }
     return ids;
   }
