@@ -1,10 +1,13 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DetachedProcessLauncher } from "./process-launcher.js";
 
 describe("DetachedProcessLauncher", () => {
   it("uses a hidden detached no-shell process with only the supplied environment", async () => {
+    const command = resolve("fixtures", "runtime", "engine.exe");
+    const cwd = resolve("fixtures", "runtime");
     const child = new EventEmitter() as ChildProcess;
     Object.defineProperty(child, "pid", { value: 4321 });
     child.unref = vi.fn();
@@ -20,22 +23,22 @@ describe("DetachedProcessLauncher", () => {
 
     await expect(
       launcher.launch({
-        command: "C:\\runtime\\engine.exe",
+        command,
         args: ["serve", "--host", "127.0.0.1"],
-        cwd: "C:\\runtime",
+        cwd,
         env: { SAFE_RUNTIME_VALUE: "present" }
       })
     ).resolves.toEqual({
       pid: 4321,
-      command: "C:\\runtime\\engine.exe",
+      command,
       startedAt: "2026-08-28T05:00:00.000Z"
     });
 
     expect(spawn).toHaveBeenCalledWith(
-      "C:\\runtime\\engine.exe",
+      command,
       ["serve", "--host", "127.0.0.1"],
       {
-        cwd: "C:\\runtime",
+        cwd,
         detached: true,
         windowsHide: true,
         shell: false,

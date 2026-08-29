@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, win32 } from "node:path";
 import { PINNED_OLLAMA_MODEL } from "@unified-ai/contracts";
 
 export const CANONICAL_REPOSITORY_ROOT =
@@ -58,15 +58,14 @@ function parsePort(value: string): number {
 }
 
 function absolutePath(value: string, key: string): string {
-  if (!isAbsolute(value)) {
+  if (!win32.isAbsolute(value)) {
     throw new Error(`${key} must be an absolute path.`);
   }
-  return resolve(value);
+  return win32.resolve(value);
 }
 
 function pathKey(value: string): string {
-  const resolved = resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  return win32.resolve(value).toLowerCase();
 }
 
 function exactPath(value: string, expected: string, key: string): string {
@@ -74,7 +73,7 @@ function exactPath(value: string, expected: string, key: string): string {
   if (pathKey(absolute) !== pathKey(expected)) {
     throw new Error(`${key} is pinned to the Phase 1 canonical path.`);
   }
-  return resolve(expected);
+  return win32.resolve(expected);
 }
 
 function loopbackHttpUrl(value: string, key: string): string {
@@ -116,7 +115,7 @@ export function readConfig(
   cwd: string = process.cwd()
 ): OrchestratorConfig {
   const repositoryRoot = exactPath(
-    resolve(
+    win32.resolve(
       cwd,
       optionalString(environment, "ORCHESTRATOR_REPOSITORY_ROOT", ".")
     ),
@@ -124,11 +123,11 @@ export function readConfig(
     "ORCHESTRATOR_REPOSITORY_ROOT"
   );
   const evidenceRoot = exactPath(
-    resolve(
+    win32.resolve(
       repositoryRoot,
       optionalString(environment, "ORCHESTRATOR_EVIDENCE_ROOT", ".local/evidence")
     ),
-    resolve(CANONICAL_REPOSITORY_ROOT, ".local", "evidence"),
+    win32.resolve(CANONICAL_REPOSITORY_ROOT, ".local", "evidence"),
     "ORCHESTRATOR_EVIDENCE_ROOT"
   );
   const trustRoot = optionalString(
@@ -139,6 +138,7 @@ export function readConfig(
   if (
     trustRoot.length === 0 ||
     isAbsolute(trustRoot) ||
+    win32.isAbsolute(trustRoot) ||
     trustRoot.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
   ) {
     throw new Error("ORCHESTRATOR_TRUST_ROOT must be a safe repository-relative path.");
@@ -213,7 +213,12 @@ export function readConfig(
       CANONICAL_WHITESHADOW_PYTHON,
       "WHITESHADOW_PYTHON"
     ),
-    webDistRoot: resolve(CANONICAL_REPOSITORY_ROOT, "apps", "web", "dist")
+    webDistRoot: win32.resolve(
+      CANONICAL_REPOSITORY_ROOT,
+      "apps",
+      "web",
+      "dist"
+    )
   };
 }
 
@@ -221,7 +226,7 @@ export function assertCanonicalConfigPaths(config: OrchestratorConfig): void {
   exactPath(config.repositoryRoot, CANONICAL_REPOSITORY_ROOT, "repositoryRoot");
   exactPath(
     config.evidenceRoot,
-    resolve(CANONICAL_REPOSITORY_ROOT, ".local", "evidence"),
+    win32.resolve(CANONICAL_REPOSITORY_ROOT, ".local", "evidence"),
     "evidenceRoot"
   );
   if (config.trustGrantRelativePath.toLowerCase() !== ".local/trust/workspace-grant.json") {
@@ -240,7 +245,7 @@ export function assertCanonicalConfigPaths(config: OrchestratorConfig): void {
   );
   exactPath(
     config.webDistRoot,
-    resolve(CANONICAL_REPOSITORY_ROOT, "apps", "web", "dist"),
+    win32.resolve(CANONICAL_REPOSITORY_ROOT, "apps", "web", "dist"),
     "webDistRoot"
   );
   if (
