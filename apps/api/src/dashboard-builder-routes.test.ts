@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import type { OrchestratorConfig } from "./config.js";
@@ -34,25 +34,28 @@ import type {
 const servers: Server[] = [];
 let sampleBytes: Buffer;
 let sampleManifest: DashboardManifest;
+const repositoryRoot = process.cwd().endsWith(`${sep}apps${sep}api`)
+  ? resolve(process.cwd(), "..", "..")
+  : process.cwd();
 
 const config: OrchestratorConfig = {
   host: "127.0.0.1",
   port: 8790,
-  repositoryRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
-  evidenceRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator\\.local\\evidence",
+  repositoryRoot,
+  evidenceRoot: resolve(repositoryRoot, ".local", "evidence"),
   trustGrantRelativePath: ".local/trust/workspace-grant.json",
   ollamaBaseUrl: "http://127.0.0.1:11434",
   ollamaExecutable: "C:\\Tools\\Ollama\\ollama.exe",
   whiteshadowBaseUrl: "http://127.0.0.1:8787",
   whiteshadowWorkspace: "D:\\whiteshadow-workspace\\local-llm-ws",
   whiteshadowPython: "D:\\whiteshadow-workspace\\local-llm-ws\\.venv\\Scripts\\python.exe",
-  webDistRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator\\apps\\web\\dist"
+  webDistRoot: resolve(repositoryRoot, "apps", "web", "dist")
 };
 
 beforeAll(async () => {
   sampleBytes = await readFile(
     resolve(
-      process.cwd(),
+      repositoryRoot,
       "sources",
       "fixtures",
       "dashboard-builder",
