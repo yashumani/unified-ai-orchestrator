@@ -1,4 +1,4 @@
-import { AgentRunner } from "@unified-ai/agent-runtime";
+import { AgentRunner, type RepositoryToolPort } from "@unified-ai/agent-runtime";
 import {
   PINNED_OLLAMA_MODEL,
   RepositoryToolNameSchema,
@@ -9,8 +9,17 @@ import {
 import { LocalEvidenceStore } from "@unified-ai/evidence-index";
 import { OllamaClient } from "@unified-ai/ollama-client";
 import { PolicyEngine } from "@unified-ai/policy-engine";
+import {
+  GitHubPortfolioIngestor,
+  GitHubRestClient
+} from "@unified-ai/portfolio-ingestion";
+import {
+  PortfolioService,
+  TwoPassOllamaPortfolioClassifier
+} from "@unified-ai/portfolio-reconciliation";
 import { RepositoryToolRegistry } from "@unified-ai/repository-tools";
 import { RuntimeManager } from "@unified-ai/runtime-manager";
+import { importChatGptExport } from "@unified-ai/session-ingestion";
 import { WhiteShadowClient } from "@unified-ai/whiteshadow-client";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
@@ -18,14 +27,21 @@ import {
   validateCanonicalRuntimePaths,
   type OrchestratorConfig
 } from "./config.js";
+import { CompositeToolRegistry, PortfolioToolRegistry } from "./portfolio-tools.js";
+
+const PORTFOLIO_GITHUB_OWNER = "yashumani";
+const PORTFOLIO_ORCHESTRATOR_REPOSITORY =
+  `${PORTFOLIO_GITHUB_OWNER}/unified-ai-orchestrator`;
 
 export interface OrchestratorServices {
   config: OrchestratorConfig;
   ollama: OllamaClient;
   whiteshadow: WhiteShadowClient;
   policy: PolicyEngine;
-  tools: RepositoryToolRegistry;
+  repositoryTools: RepositoryToolRegistry;
+  tools: RepositoryToolPort;
   evidence: LocalEvidenceStore;
+  portfolio: PortfolioService;
   agent: AgentRunner;
   runtime: RuntimeManager;
 }
@@ -104,7 +120,7 @@ export async function createServices(
     repositoryRoot: config.repositoryRoot,
     grantRelativePath: config.trustGrantRelativePath
   });
-  const tools = new RepositoryToolRegistry({
+  const repositoryTools = new RepositoryToolRegistry({
     repositoryRoot: config.repositoryRoot,
     authorizeMutation: async (call) => {
       const path = mutationPath(call);
@@ -120,6 +136,30 @@ export async function createServices(
     repositoryRoot: config.repositoryRoot
   });
   await evidence.initialize();
+  const github = new GitHubRestClient({
+    credentials: {
+      getToken: async () => {
+        const token = process.env["GITHUB_TOKEN"]?.trim() ??
+          process.env["GH_TOKEN"]?.trim();
+        return token === undefined || token.length === 0 ? undefined : token;
+      }
+    }
+  });
+  const portfolio = new PortfolioService({
+    owner: PORTFOLIO_GITHUB_OWNER,
+    orchestratorFullName: PORTFOLIO_ORCHESTRATOR_REPOSITORY,
+    ingestor: new GitHubPortfolioIngestor({ client: github }),
+    evidence,
+    classifier: new TwoPassOllamaPortfolioClassifier(ollama),
+    chatImporter: {
+      import: async (input, projectId) =>
+        await importChatGptExport(input, evidence, { projectId })
+    }
+  });
+  const tools = new CompositeToolRegistry(
+    repositoryTools,
+    new PortfolioToolRegistry(portfolio)
+  );
   const agent = new AgentRunner({
     ollama,
     tools,
@@ -198,8 +238,10 @@ export async function createServices(
     ollama,
     whiteshadow,
     policy,
+    repositoryTools,
     tools,
     evidence,
+    portfolio,
     agent,
     runtime
   };

@@ -29,6 +29,12 @@
       "path": "./services/session-ingestion"
     },
     {
+      "path": "./services/portfolio-ingestion"
+    },
+    {
+      "path": "./services/portfolio-reconciliation"
+    },
+    {
       "path": "./apps/api"
     },
     {

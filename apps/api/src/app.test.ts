@@ -98,6 +98,33 @@ function services(overrides: Partial<OrchestratorServices> = {}): OrchestratorSe
       listAgentRunReceipts: vi.fn(async () => []),
       readAgentRunReceipt: vi.fn()
     },
+    portfolio: {
+      startRun: vi.fn(() => ({
+        runId: "portfolio-run-fixture",
+        status: "queued",
+        createdAt: "2026-08-29T00:00:00.000Z",
+        repositoryCount: 0,
+        completeCount: 0,
+        incompleteCount: 0,
+        warningCount: 0,
+        warnings: [],
+        revisionMismatchCount: 0
+      })),
+      listRuns: vi.fn(() => []),
+      getRun: vi.fn(),
+      listRepositories: vi.fn(() => []),
+      getRepository: vi.fn(),
+      listClusters: vi.fn(() => []),
+      getCluster: vi.fn(),
+      listRecommendations: vi.fn(() => []),
+      getRecommendation: vi.fn(),
+      overrideRecommendation: vi.fn(),
+      importChat: vi.fn(async () => ({
+        importedCount: 1,
+        receiptId: "receipt-chat-fixture",
+        receiptIds: ["receipt-chat-fixture"]
+      }))
+    },
     agent: { start: vi.fn() },
     ollama: {},
     tools: {},
@@ -284,5 +311,57 @@ describe("local API", () => {
     const text = await response.text();
     expect(text).not.toMatch(/token|password|secret|ghp_/iu);
     expect(text).toContain(PINNED_OLLAMA_MODEL);
+  });
+
+  it("exposes explicit portfolio refresh and sanitized read routes", async () => {
+    const configured = services();
+    const baseUrl = await startLocal(configured);
+    const refresh = await fetch(`${baseUrl}/api/portfolio/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}"
+    });
+    expect(refresh.status).toBe(202);
+    expect(await refresh.json()).toMatchObject({
+      runId: "portfolio-run-fixture",
+      status: "queued"
+    });
+    expect(configured.portfolio.startRun).toHaveBeenCalledOnce();
+
+    await expect(
+      (await fetch(`${baseUrl}/api/portfolio/repositories`)).json()
+    ).resolves.toEqual({ items: [] });
+    await expect(
+      (await fetch(`${baseUrl}/api/portfolio/clusters`)).json()
+    ).resolves.toEqual({ items: [] });
+    await expect(
+      (await fetch(`${baseUrl}/api/portfolio/recommendations`)).json()
+    ).resolves.toEqual({ items: [] });
+  });
+
+  it("accepts a bounded large ChatGPT export only on its dedicated JSON route", async () => {
+    const configured = services();
+    const baseUrl = await startLocal(configured);
+    const conversations = [
+      {
+        id: "conversation-fixture",
+        title: "Synthetic export",
+        padding: "x".repeat(1_100_000)
+      }
+    ];
+    const response = await fetch(`${baseUrl}/api/portfolio/chat-imports`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: "app-development",
+        conversations
+      })
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      importedCount: 1,
+      receiptId: "receipt-chat-fixture"
+    });
+    expect(configured.portfolio.importChat).toHaveBeenCalledOnce();
   });
 });

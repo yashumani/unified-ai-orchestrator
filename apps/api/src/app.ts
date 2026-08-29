@@ -118,6 +118,13 @@ export async function createApp(options: CreateAppOptions): Promise<Express> {
     })
   );
   app.use(mutationRequestGuard(options.config));
+  app.use(
+    "/api/portfolio/chat-imports",
+    express.json({
+      limit: "25mb",
+      type: ["application/json", "application/*+json"]
+    })
+  );
   app.use(express.json({ limit: "1mb", type: ["application/json", "application/*+json"] }));
 
   app.post("/api/agent", createAgentRequestHandler(services.agent));

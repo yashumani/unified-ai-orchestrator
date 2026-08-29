@@ -17,5 +17,8 @@
     { "path": "../../packages/runtime-manager" },
     { "path": "../../packages/whiteshadow-client" },
     { "path": "../../services/evidence-index" }
+    ,{ "path": "../../services/session-ingestion" }
+    ,{ "path": "../../services/portfolio-ingestion" }
+    ,{ "path": "../../services/portfolio-reconciliation" }
   ]
 }
