@@ -44,7 +44,8 @@ body {
 
 button,
 textarea,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -60,7 +61,8 @@ a,
 button,
 summary,
 textarea,
-input {
+input,
+select {
   outline: none;
 }
 
@@ -69,6 +71,7 @@ button:focus-visible,
 summary:focus-visible,
 textarea:focus-visible,
 input:focus-visible,
+select:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid var(--beacon-amber);
   outline-offset: 3px;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export const WORKSPACE_IDS = [
   "operator",
@@ -7,6 +7,9 @@ export const WORKSPACE_IDS = [
 ] as const;
 
 export type WorkspaceId = (typeof WORKSPACE_IDS)[number];
+type WorkspaceNavigationGuard = (workspace: WorkspaceId) => boolean;
+
+const allowWorkspaceNavigation: WorkspaceNavigationGuard = () => true;
 
 export function workspaceFromSearch(search: string): WorkspaceId {
   const workspace = new URLSearchParams(search).get("workspace");
@@ -23,29 +26,49 @@ export function workspaceHref(
   return `${url.pathname}${url.search}`;
 }
 
-export function useWorkspaceNavigation() {
+export function useWorkspaceNavigation(
+  canNavigate: WorkspaceNavigationGuard = allowWorkspaceNavigation
+) {
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(() =>
     workspaceFromSearch(window.location.search)
   );
+  const activeWorkspaceRef = useRef(activeWorkspace);
 
   useEffect(() => {
     const followHistory = () => {
-      setActiveWorkspace(workspaceFromSearch(window.location.search));
+      const nextWorkspace = workspaceFromSearch(window.location.search);
+      if (
+        nextWorkspace !== activeWorkspaceRef.current &&
+        !canNavigate(nextWorkspace)
+      ) {
+        window.history.pushState(
+          {},
+          "",
+          workspaceHref(activeWorkspaceRef.current)
+        );
+        return;
+      }
+      activeWorkspaceRef.current = nextWorkspace;
+      setActiveWorkspace(nextWorkspace);
     };
     window.addEventListener("popstate", followHistory);
     return () => {
       window.removeEventListener("popstate", followHistory);
     };
-  }, []);
+  }, [canNavigate]);
 
   const navigate = useCallback((workspace: WorkspaceId) => {
+    if (workspace !== activeWorkspaceRef.current && !canNavigate(workspace)) {
+      return;
+    }
     const nextHref = workspaceHref(workspace);
     const currentHref = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     if (nextHref !== currentHref) {
       window.history.pushState({}, "", nextHref);
     }
+    activeWorkspaceRef.current = workspace;
     setActiveWorkspace(workspace);
-  }, []);
+  }, [canNavigate]);
 
   return { activeWorkspace, navigate };
 }

@@ -23,12 +23,28 @@ function NavigationHarness() {
   );
 }
 
-function response(body: unknown) {
-  return {
-    ok: true,
+function GuardedNavigationHarness({
+  canNavigate
+}: {
+  canNavigate: (workspace: "operator" | "portfolio" | "dashboard-builder") => boolean;
+}) {
+  const navigation = useWorkspaceNavigation(canNavigate);
+  return (
+    <>
+      <output data-active-workspace>{navigation.activeWorkspace}</output>
+      <WorkspaceNavigation
+        activeWorkspace={navigation.activeWorkspace}
+        onNavigate={navigation.navigate}
+      />
+    </>
+  );
+}
+
+function response(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
     status: 200,
-    json: async () => body
-  } satisfies Pick<Response, "ok" | "status" | "json">;
+    headers: { "content-type": "application/json" }
+  });
 }
 
 async function settleWorkspace() {
@@ -113,11 +129,83 @@ describe("workspace navigation", () => {
     await view.unmount();
   });
 
+  it("keeps the current workspace and URL when a dirty-navigation guard blocks links or history", async () => {
+    window.history.replaceState({}, "", "/?workspace=operator");
+    const canNavigate = vi.fn(() => false);
+    const view = await render(
+      <GuardedNavigationHarness canNavigate={canNavigate} />
+    );
+    const portfolioLink = Array.from(
+      view.container.querySelectorAll<HTMLAnchorElement>("nav a")
+    ).find((link) => link.textContent?.startsWith("Portfolio"));
+
+    await act(async () => {
+      portfolioLink?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+    });
+
+    expect(window.location.search).toBe("?workspace=operator");
+    expect(view.container.querySelector("[data-active-workspace]")?.textContent).toBe(
+      "operator"
+    );
+
+    await act(async () => {
+      window.history.pushState({}, "", "/?workspace=dashboard-builder");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(window.location.search).toBe("?workspace=operator");
+    expect(view.container.querySelector("[data-active-workspace]")?.textContent).toBe(
+      "operator"
+    );
+    expect(canNavigate).toHaveBeenCalledWith("portfolio");
+    expect(canNavigate).toHaveBeenCalledWith("dashboard-builder");
+    await view.unmount();
+  });
+
   it("mounts only the selected Dashboard builder workspace", async () => {
     window.history.replaceState({}, "", "/?workspace=dashboard-builder");
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/dashboard-builder/templates") {
+        return response({ items: [] });
+      }
+      if (path === "/api/dashboard-builder/adapters") {
+        return response({
+          items: [
+            {
+              adapterId: "fixture",
+              label: "Synthetic fixture",
+              status: "ready",
+              capabilities: {
+                portableCalculations: true,
+                qlikCalculations: false,
+                selections: true,
+                paging: true
+              },
+              diagnostics: []
+            },
+            {
+              adapterId: "qlik",
+              label: "Qlik",
+              status: "unavailable",
+              capabilities: {
+                portableCalculations: false,
+                qlikCalculations: false,
+                selections: false,
+                paging: false
+              },
+              diagnostics: []
+            }
+          ]
+        });
+      }
+      throw new Error(`Unexpected active-workspace request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
     const view = await render(<App />);
+    await settleWorkspace();
 
     expect(view.container.querySelector("#workspace-main")).not.toBeNull();
     expect(
@@ -126,7 +214,11 @@ describe("workspace navigation", () => {
     expect(view.container.textContent).toContain("Dashboard builder");
     expect(view.container.textContent).not.toContain("Unified operator console");
     expect(view.container.textContent).not.toContain("Portfolio Overview");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/dashboard-builder/templates",
+      "/api/dashboard-builder/adapters"
+    ]);
 
     await view.unmount();
   });
