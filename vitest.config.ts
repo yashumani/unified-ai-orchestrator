@@ -18,6 +18,7 @@ export default defineConfig({
             "apps/api/**/*.test.ts",
             "packages/**/*.test.ts",
             "services/**/*.test.ts",
+            "scripts/**/*.test.ts",
             "scripts/**/*.test.mjs"
           ]
         }

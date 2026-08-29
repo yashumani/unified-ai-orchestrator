@@ -1,8 +1,8 @@
 # Unified AI Orchestrator
 
-Unified AI Orchestrator is a loopback-only local application for governed AI work inside this repository. Phase 1 combines a pinned Ollama model (`qwen3:4b`), a CopilotKit chat console, guarded repository tools, persistent repository-scoped trust, read-only WhiteShadow capability discovery, and immutable run receipts.
+Unified AI Orchestrator is a loopback-only local application for governed AI work inside this repository. Phase 1 combines a pinned Ollama model (`qwen3:4b`), a CopilotKit chat console, guarded repository tools, persistent repository-scoped trust, read-only WhiteShadow capability discovery, and immutable run receipts. Phase 2 adds a GET/HEAD-only GitHub portfolio audit, deterministic overlap analysis, cited local-model recommendations, ChatGPT intent-evidence import, and a rationalization dashboard.
 
-The approved architecture is in [the Phase 1 design](docs/superpowers/specs/2026-08-28-ollama-orchestration-phase-1-design.md), and the delivery gates are in [the Phase 1 implementation plan](docs/plans/2026-08-28-ollama-orchestration-phase-1-implementation-plan.md).
+The approved architectures and delivery gates are in the [Phase 1 design](docs/superpowers/specs/2026-08-28-ollama-orchestration-phase-1-design.md), [Phase 1 implementation plan](docs/plans/2026-08-28-ollama-orchestration-phase-1-implementation-plan.md), [Phase 2 design](docs/superpowers/specs/2026-08-28-portfolio-rationalization-phase-2-design.md), and [Phase 2 implementation plan](docs/plans/2026-08-28-portfolio-rationalization-phase-2-implementation-plan.md).
 
 ## Safety boundary
 
@@ -38,7 +38,7 @@ If `.env` does not already exist, create it from the public template:
 Copy-Item -LiteralPath .env.example -Destination .env
 ```
 
-Keep credentials only in `.env`. Do not place a GitHub personal access token in source, documentation, command history, or browser-visible configuration. The Phase 1 application does not require one.
+Keep credentials only in `.env`. Do not place a GitHub personal access token in source, documentation, command history, or browser-visible configuration. Phase 1 does not require one; Phase 2 live portfolio inventory uses `GITHUB_TOKEN` or `GH_TOKEN` through an injected credential provider and rejects every GitHub method except `GET` and `HEAD`.
 
 The defaults are:
 
@@ -83,6 +83,18 @@ WhiteShadow may be offline while Ollama chat and repository tools remain usable;
 Each local Ollama request has a 120-second bound, while the complete agent run remains bounded to 300 seconds. A cold first response can therefore load the installed model without creating an unbounded operation.
 
 See [the Phase 1 operator runbook](docs/operations/phase-1-local-orchestrator.md) for API probes and recovery guidance. The source-and-proof record is in [the Phase 1 acceptance summary](docs/operations/phase-1-acceptance-summary.md).
+
+## Portfolio rationalization
+
+The Portfolio workspace captures eight evidence families for each source repository, derives profiles and overlap clusters, and creates one cited recommendation per source. Deterministic rules remain authoritative; two independent `qwen3:4b` passes can enrich a recommendation but cannot invent eligibility, citations, or cluster membership. Imported ChatGPT conversations are optional intent evidence and never implementation proof.
+
+Use the explicit dashboard refresh for normal local operation. For the feature-branch acceptance gate, follow [the portfolio rationalization runbook](docs/operations/portfolio-rationalization.md) and run exactly one opt-in acceptance command:
+
+```powershell
+npm run portfolio:acceptance -- --live
+```
+
+The command requires the exact portfolio feature branch, the existing ignored `.env`, and the already-installed `qwen3:4b` model. It writes immutable evidence plus a sanitized report only under ignored `.local/` storage. It does not write to source repositories, WhiteShadow, ChatGPT, or Ollama model inventory.
 
 ## Useful commands
 
