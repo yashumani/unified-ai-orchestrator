@@ -167,12 +167,18 @@ export function evaluateRecommendation(input: {
     agreedAction !== null && eligibleActions.includes(agreedAction)
       ? agreedAction
       : preferredDeterministicAction(eligibleActions);
-  const citationIds = [
+  const classifierCitationIds = [
     ...new Set([
       ...(input.classifier.first?.citationIds ?? []),
       ...(input.classifier.second?.citationIds ?? [])
     ])
   ].sort((left, right) => left.localeCompare(right));
+  const citationIds =
+    classifierCitationIds.length > 0
+      ? classifierCitationIds
+      : input.profile.citations
+          .map((citation) => citation.citationId)
+          .sort((left, right) => left.localeCompare(right));
   const citations = validCitationRatio(input.profile, citationIds);
   const confidence = calculateConfidence({
     coverage: evidenceCoverage(input.profile),

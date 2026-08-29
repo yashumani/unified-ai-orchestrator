@@ -243,6 +243,34 @@ describe("PortfolioService", () => {
     expect(evidence.events).toHaveLength(2);
   });
 
+  test("recovers only schema- and hash-bound sanitized aggregates", async () => {
+    const evidence = memoryEvidence();
+    const first = new PortfolioService({
+      owner: "fixture-owner",
+      orchestratorFullName: "fixture-owner/unified-ai-orchestrator",
+      ingestor: { ingestOwnedPortfolio: vi.fn(async () => ingestion()) },
+      evidence,
+      classifier: agreeingClassifier,
+      now: () => new Date(CAPTURED_AT),
+      runId: () => "portfolio-run-recovery"
+    });
+    first.startRun();
+    await first.waitForRun("portfolio-run-recovery");
+
+    const recovered = new PortfolioService({
+      owner: "fixture-owner",
+      orchestratorFullName: "fixture-owner/unified-ai-orchestrator",
+      ingestor: { ingestOwnedPortfolio: vi.fn(async () => ingestion()) },
+      evidence,
+      now: () => new Date(CAPTURED_AT)
+    });
+    await recovered.initialize();
+
+    expect(recovered.listRuns()).toHaveLength(1);
+    expect(recovered.listRepositories()).toHaveLength(1);
+    expect(recovered.listRecommendations()[0]?.decisionHistory).toHaveLength(1);
+  });
+
   test("treats imported chat as non-authoritative intent on the next run", async () => {
     const evidence = memoryEvidence();
     const runIds = ["portfolio-run-chat-before", "portfolio-run-chat-after"];

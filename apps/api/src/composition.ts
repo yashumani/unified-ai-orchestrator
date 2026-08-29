@@ -156,6 +156,7 @@ export async function createServices(
         await importChatGptExport(input, evidence, { projectId })
     }
   });
+  await portfolio.initialize();
   const tools = new CompositeToolRegistry(
     repositoryTools,
     new PortfolioToolRegistry(portfolio)

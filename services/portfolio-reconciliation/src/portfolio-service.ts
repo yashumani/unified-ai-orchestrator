@@ -27,8 +27,13 @@ import type {
   RepositoryPortfolioSnapshot
 } from "@unified-ai/portfolio-ingestion";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { buildPortfolioClusters } from "./clusters.js";
-import { eligibleRecommendationActions, evaluateRecommendation } from "./reconcile.js";
+import {
+  compareProfiles,
+  eligibleRecommendationActions,
+  evaluateRecommendation
+} from "./reconcile.js";
 import { buildRepositoryProfileArtifacts } from "./profile.js";
 import type {
   ClassifierResult,
@@ -170,6 +175,108 @@ interface PersistedPortfolioAggregate {
   }>;
 }
 
+const runSummarySchema = z
+  .object({
+    runId: StableIdSchema,
+    status: z.enum(["queued", "running", "succeeded", "failed"]),
+    createdAt: z.string().datetime({ offset: true }),
+    completedAt: z.string().datetime({ offset: true }).optional(),
+    repositoryCount: z.number().int().nonnegative(),
+    completeCount: z.number().int().nonnegative(),
+    incompleteCount: z.number().int().nonnegative(),
+    warningCount: z.number().int().nonnegative(),
+    warnings: z.array(z.string().max(500)).max(500),
+    inventoryFingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    revisionMismatchCount: z.number().int().nonnegative()
+  })
+  .strict();
+
+const citationProjectionSchema = z
+  .object({
+    citationId: StableIdSchema,
+    family: z.string().min(1).max(100),
+    locator: z.string().min(1).max(2_000),
+    statement: z.string().min(1).max(10_000)
+  })
+  .strict();
+
+const repositoryProjectionSchema = z
+  .object({
+    repositoryId: StableIdSchema,
+    fullName: z.string().min(1).max(500),
+    visibility: z.enum(["public", "private", "internal", "unknown"]),
+    purpose: z.string().min(1).max(10_000),
+    capabilities: z.array(z.string().min(1).max(500)).max(100),
+    technologyTags: z.array(z.string().min(1).max(200)).max(100),
+    evidenceCoverage: z.number().finite().min(0).max(1),
+    chatCoverage: z.number().int().nonnegative(),
+    contradictions: z.array(z.string().min(1).max(10_000)).max(100),
+    citations: z.array(citationProjectionSchema).min(1).max(500),
+    capturedRevision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u),
+    recommendationAction: RecommendationActionSchema.optional()
+  })
+  .strict();
+
+const clusterProjectionSchema = z
+  .object({
+    clusterId: StableIdSchema,
+    label: z.string().min(1).max(500),
+    rationale: z.string().min(1).max(10_000),
+    sharedCapabilities: z.array(z.string().min(1).max(500)).min(1).max(100),
+    repositoryIds: z.array(StableIdSchema).min(2).max(100),
+    citationIds: z.array(StableIdSchema).min(1).max(500)
+  })
+  .strict();
+
+const persistedRecommendationSchema = z
+  .object({
+    recommendation: PortfolioRecommendationSchema,
+    recommendationObjectSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    evidenceObjectSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    eligibleActions: z.array(RecommendationActionSchema).min(1).max(6),
+    contradictions: z.array(z.string().min(1).max(10_000)).max(100)
+  })
+  .strict()
+  .superRefine((stored, context) => {
+    if (stored.evidenceObjectSha256 !== stored.recommendation.evidenceObjectSha256) {
+      context.addIssue({
+        code: "custom",
+        message: "recommendation evidence hash does not match",
+        path: ["evidenceObjectSha256"]
+      });
+    }
+  });
+
+const persistedPortfolioAggregateSchema = z
+  .object({
+    schemaVersion: z.literal("portfolio-analysis/v1"),
+    runId: StableIdSchema,
+    summary: runSummarySchema,
+    repositories: z.array(repositoryProjectionSchema).min(1).max(100),
+    clusters: z.array(clusterProjectionSchema).max(100),
+    recommendations: z.array(persistedRecommendationSchema).min(1).max(100)
+  })
+  .strict()
+  .superRefine((aggregate, context) => {
+    if (aggregate.summary.runId !== aggregate.runId) {
+      context.addIssue({
+        code: "custom",
+        message: "aggregate summary runId does not match",
+        path: ["summary", "runId"]
+      });
+    }
+    if (
+      aggregate.summary.repositoryCount !== aggregate.repositories.length ||
+      aggregate.recommendations.length !== aggregate.repositories.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "aggregate repository and recommendation counts do not match",
+        path: ["repositories"]
+      });
+    }
+  });
+
 export interface PortfolioServiceOptions {
   owner: string;
   orchestratorFullName: string;
@@ -286,16 +393,12 @@ function linkedRepositories(
   const eligible = peers
     .filter((peer) => peer.binding.repositoryId !== subject.binding.repositoryId)
     .filter((peer) => {
-      const subjectCaps = new Set(subject.capabilities);
-      const peerCaps = new Set(peer.capabilities);
-      const shared = [...subjectCaps].filter((capability) => peerCaps.has(capability));
-      const union = new Set([...subjectCaps, ...peerCaps]);
-      const overlap = union.size === 0 ? 0 : shared.length / union.size;
-      const samePurpose =
-        subject.purpose.trim().toLowerCase() === peer.purpose.trim().toLowerCase();
+      const overlap = compareProfiles(subject, peer);
       return action === "combine-with-peer"
-        ? samePurpose && overlap >= 0.6
-        : !samePurpose && shared.length >= 2 && overlap >= 0.3;
+        ? overlap.samePurpose && overlap.jaccard >= 0.6
+        : !overlap.samePurpose &&
+            overlap.sharedCapabilities.length >= 2 &&
+            overlap.jaccard >= 0.3;
     })
     .sort((left, right) =>
       left.binding.repositoryId.localeCompare(right.binding.repositoryId)
@@ -341,6 +444,123 @@ export class PortfolioService {
     this.#chatImporter = options.chatImporter;
     this.#now = options.now ?? (() => new Date());
     this.#runId = options.runId ?? runId;
+  }
+
+  async initialize(): Promise<void> {
+    const [runs, events] = await Promise.all([
+      this.#evidence.listPortfolioRuns(20),
+      this.#evidence.listRecommendationDecisionEvents(100)
+    ]);
+    for (const run of runs.reverse()) {
+      try {
+        const aggregate = persistedPortfolioAggregateSchema.parse(
+          await this.#evidence.readObject(run.evidenceObjectSha256)
+        );
+        if (
+          aggregate.runId !== run.runId ||
+          run.repositories.length !== aggregate.repositories.length ||
+          run.repositories.some((binding) => {
+            const repository = aggregate.repositories.find(
+              (candidate) => candidate.repositoryId === binding.repositoryId
+            );
+            return (
+              repository === undefined ||
+              repository.capturedRevision !== binding.capturedRevision
+            );
+          })
+        ) {
+          throw new Error("stored portfolio aggregate failed run identity binding");
+        }
+        const recommendations = aggregate.recommendations.map((stored) => {
+          const history = events
+            .filter(
+              (event) =>
+                event.runId === run.runId &&
+                event.recommendationId ===
+                  stored.recommendation.recommendationId &&
+                event.recommendationObjectSha256 ===
+                  stored.recommendationObjectSha256
+            )
+            .sort((left, right) => left.sequence - right.sequence);
+          const latest = history.at(-1);
+          return {
+            ...stored,
+            currentAction: latest?.action ?? stored.recommendation.action,
+            currentLifecycle:
+              latest?.lifecycle ?? stored.recommendation.lifecycle,
+            events: history
+          } satisfies StoredRecommendation;
+        });
+        const recoveredSummary: PortfolioRunSummary = {
+          runId: aggregate.summary.runId,
+          status: aggregate.summary.status,
+          createdAt: aggregate.summary.createdAt,
+          ...(aggregate.summary.completedAt === undefined
+            ? {}
+            : { completedAt: aggregate.summary.completedAt }),
+          repositoryCount: aggregate.summary.repositoryCount,
+          completeCount: aggregate.summary.completeCount,
+          incompleteCount: aggregate.summary.incompleteCount,
+          warningCount: aggregate.summary.warningCount,
+          warnings: aggregate.summary.warnings,
+          ...(aggregate.summary.inventoryFingerprint === undefined
+            ? {}
+            : {
+                inventoryFingerprint:
+                  aggregate.summary.inventoryFingerprint
+              }),
+          revisionMismatchCount: aggregate.summary.revisionMismatchCount
+        };
+        const recoveredRepositories: PortfolioRepositoryProjection[] =
+          aggregate.repositories.map((repository) => ({
+            repositoryId: repository.repositoryId,
+            fullName: repository.fullName,
+            visibility: repository.visibility,
+            purpose: repository.purpose,
+            capabilities: repository.capabilities,
+            technologyTags: repository.technologyTags,
+            evidenceCoverage: repository.evidenceCoverage,
+            chatCoverage: repository.chatCoverage,
+            contradictions: repository.contradictions,
+            citations: repository.citations,
+            capturedRevision: repository.capturedRevision,
+            ...(repository.recommendationAction === undefined
+              ? {}
+              : {
+                  recommendationAction:
+                    repository.recommendationAction
+                })
+          }));
+        this.#runs.set(run.runId, {
+          summary: recoveredSummary,
+          repositories: recoveredRepositories,
+          clusters: aggregate.clusters,
+          recommendations,
+          deterministicProfiles: []
+        });
+      } catch {
+        this.#runs.set(run.runId, {
+          summary: {
+            runId: run.runId,
+            status: "failed",
+            createdAt: run.createdAt,
+            completedAt: run.createdAt,
+            repositoryCount: run.repositories.length,
+            completeCount: 0,
+            incompleteCount: run.repositories.length,
+            warningCount: 1,
+            warnings: [
+              "Stored portfolio analysis failed its integrity or schema validation."
+            ],
+            revisionMismatchCount: 0
+          },
+          repositories: [],
+          clusters: [],
+          recommendations: [],
+          deterministicProfiles: []
+        });
+      }
+    }
   }
 
   startRun(): PortfolioRunSummary {
@@ -647,6 +867,7 @@ export class PortfolioService {
     }
 
     const storedRecommendations: StoredRecommendation[] = [];
+    const classifierWarnings: string[] = [];
     for (const profile of profiles) {
       const eligibleActions = eligibleRecommendationActions(profile, profiles, this.#now());
       let classifier: ClassifierResult = {
@@ -663,6 +884,7 @@ export class PortfolioService {
         classifier,
         now: this.#now()
       });
+      classifierWarnings.push(...evaluation.warnings);
       const repositories = linkedRepositories(
         evaluation.action,
         profile,
@@ -696,10 +918,19 @@ export class PortfolioService {
         createdAt: ingestion.completedAt,
         evidenceObjectSha256: recommendationEvidence.sha256,
         repositories,
-        citationIds:
-          evaluation.citationIds.length > 0
-            ? evaluation.citationIds
-            : profile.citations.map((citation) => citation.citationId),
+        citationIds: [
+          ...new Set([
+            ...evaluation.citationIds,
+            ...repositories.flatMap((binding) =>
+              profiles
+                .find(
+                  (candidate) =>
+                    candidate.binding.repositoryId === binding.repositoryId
+                )
+                ?.citations.map((citation) => citation.citationId) ?? []
+            )
+          ])
+        ].sort(),
         rationale: evaluation.rationale,
         confidence: evaluation.confidence
       });
@@ -785,7 +1016,7 @@ export class PortfolioService {
     ).length;
     state.summary.incompleteCount =
       repositories.length - state.summary.completeCount;
-    state.summary.warnings = [...ingestion.warnings];
+    state.summary.warnings = [...ingestion.warnings, ...classifierWarnings];
     state.summary.warningCount = state.summary.warnings.length;
     state.summary.inventoryFingerprint = hash(
       sourceInventory
@@ -866,8 +1097,17 @@ export class PortfolioService {
   }
 
   #latest(): PortfolioRunState | undefined {
-    return [...this.#runs.values()]
-      .reverse()
-      .find((state) => state.summary.status === "succeeded");
+    let latest: PortfolioRunState | undefined;
+    for (const state of this.#runs.values()) {
+      if (
+        state.summary.status === "succeeded" &&
+        (latest === undefined ||
+          Date.parse(state.summary.createdAt) >=
+            Date.parse(latest.summary.createdAt))
+      ) {
+        latest = state;
+      }
+    }
+    return latest;
   }
 }
