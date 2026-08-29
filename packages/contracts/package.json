@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./dashboard-builder": {
+      "types": "./dist/dashboard-builder.d.ts",
+      "default": "./dist/dashboard-builder.js"
     }
   },
   "dependencies": {

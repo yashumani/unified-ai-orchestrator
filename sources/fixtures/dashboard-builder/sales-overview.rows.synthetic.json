@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "dashboard-fixture/v1",
+  "fixtureId": "sales-overview-v1",
+  "synthetic": true,
+  "fields": [
+    {
+      "fieldId": "order-date",
+      "valueType": "date"
+    },
+    {
+      "fieldId": "region",
+      "valueType": "string"
+    },
+    {
+      "fieldId": "channel",
+      "valueType": "string"
+    },
+    {
+      "fieldId": "sales",
+      "valueType": "number"
+    },
+    {
+      "fieldId": "cost",
+      "valueType": "number"
+    },
+    {
+      "fieldId": "units",
+      "valueType": "number"
+    }
+  ],
+  "rows": [
+    {
+      "order-date": "2026-01-05",
+      "region": "North",
+      "channel": "Direct",
+      "sales": 12800,
+      "cost": 7600,
+      "units": 32
+    },
+    {
+      "order-date": "2026-01-12",
+      "region": "South",
+      "channel": "Partner",
+      "sales": 9400,
+      "cost": 6100,
+      "units": 24
+    },
+    {
+      "order-date": "2026-01-19",
+      "region": "East",
+      "channel": "Online",
+      "sales": 15750,
+      "cost": 9100,
+      "units": 39
+    },
+    {
+      "order-date": "2026-01-26",
+      "region": "West",
+      "channel": "Direct",
+      "sales": 11200,
+      "cost": 6800,
+      "units": 28
+    },
+    {
+      "order-date": "2026-02-02",
+      "region": "North",
+      "channel": "Online",
+      "sales": 16400,
+      "cost": 9700,
+      "units": 41
+    },
+    {
+      "order-date": "2026-02-09",
+      "region": "South",
+      "channel": "Direct",
+      "sales": 13600,
+      "cost": 8200,
+      "units": 34
+    },
+    {
+      "order-date": "2026-02-16",
+      "region": "East",
+      "channel": "Partner",
+      "sales": 10100,
+      "cost": 6500,
+      "units": 26
+    },
+    {
+      "order-date": "2026-02-23",
+      "region": "West",
+      "channel": "Online",
+      "sales": 18100,
+      "cost": 10400,
+      "units": 45
+    }
+  ]
+}
