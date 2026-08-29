@@ -30,6 +30,13 @@ async function makeGitRepository(branch = "feature/policy-test"): Promise<string
   const repositoryRoot = join(temporaryRoot, "repository");
   await mkdir(repositoryRoot);
   await git(repositoryRoot, "init", "--quiet");
+  await git(repositoryRoot, "config", "user.name", "Unified AI test fixture");
+  await git(
+    repositoryRoot,
+    "config",
+    "user.email",
+    "unified-ai-test-fixture@example.invalid"
+  );
   await git(repositoryRoot, "switch", "--quiet", "--create", branch);
   await git(
     repositoryRoot,
