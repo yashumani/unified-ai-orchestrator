@@ -3,6 +3,8 @@ import {
   RuntimeStatusSchema,
   TrustStateSchema
 } from "@unified-ai/contracts";
+import { DashboardManifestSchema } from "@unified-ai/contracts/dashboard-builder";
+import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -12,6 +14,15 @@ import type { OrchestratorConfig } from "./config.js";
 import type { OrchestratorServices } from "./composition.js";
 
 const servers: Server[] = [];
+const dashboardSampleBytes = readFileSync(
+  new URL(
+    "../../../sources/fixtures/dashboard-builder/sales-overview.manifest.json",
+    import.meta.url
+  )
+);
+const dashboardSampleManifest = DashboardManifestSchema.parse(
+  JSON.parse(dashboardSampleBytes.toString("utf8")) as unknown
+);
 
 afterEach(async () => {
   await Promise.all(
@@ -97,6 +108,13 @@ function services(overrides: Partial<OrchestratorServices> = {}): OrchestratorSe
     evidence: {
       listAgentRunReceipts: vi.fn(async () => []),
       readAgentRunReceipt: vi.fn()
+    },
+    dashboardBuilder: {
+      service: {},
+      sample: {
+        manifest: dashboardSampleManifest,
+        manifestBytes: dashboardSampleBytes
+      }
     },
     portfolio: {
       startRun: vi.fn(() => ({

@@ -16,6 +16,7 @@
     { "path": "../../packages/agent-runtime" },
     { "path": "../../packages/runtime-manager" },
     { "path": "../../packages/whiteshadow-client" },
+    { "path": "../../services/dashboard-builder" },
     { "path": "../../services/evidence-index" }
     ,{ "path": "../../services/session-ingestion" }
     ,{ "path": "../../services/portfolio-ingestion" }

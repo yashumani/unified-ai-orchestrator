@@ -18,6 +18,7 @@
     "@copilotkit/runtime": "1.69.3",
     "@unified-ai/agent-runtime": "0.1.0",
     "@unified-ai/contracts": "0.1.0",
+    "@unified-ai/dashboard-builder": "0.1.0",
     "@unified-ai/evidence-index": "0.1.0",
     "@unified-ai/ollama-client": "0.1.0",
     "@unified-ai/portfolio-ingestion": "0.1.0",

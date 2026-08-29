@@ -1,5 +1,6 @@
 import cors from "cors";
 import express, { type Express, type RequestHandler } from "express";
+import { DASHBOARD_MAX_UPLOAD_BYTES } from "@unified-ai/contracts/dashboard-builder";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createAgentRequestHandler } from "./agui/agent-endpoint.js";
@@ -118,6 +119,13 @@ export async function createApp(options: CreateAppOptions): Promise<Express> {
     })
   );
   app.use(mutationRequestGuard(options.config));
+  app.use(
+    "/api/dashboard-builder/imports",
+    express.raw({
+      limit: DASHBOARD_MAX_UPLOAD_BYTES,
+      type: ["application/json", "application/*+json"]
+    })
+  );
   app.use(
     "/api/portfolio/chat-imports",
     express.json({

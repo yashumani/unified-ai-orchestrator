@@ -9,6 +9,7 @@ import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { ApiError } from "./errors.js";
 import type { OrchestratorServices } from "./composition.js";
+import { createDashboardBuilderRouter } from "./dashboard-builder-routes.js";
 
 const listRunsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20)
@@ -43,6 +44,11 @@ function asyncRoute(
 
 export function createApiRouter(services: OrchestratorServices): Router {
   const router = Router();
+
+  router.use(
+    "/dashboard-builder",
+    createDashboardBuilderRouter(services.dashboardBuilder)
+  );
 
   router.get("/health", (_request, response) => {
     response.json({

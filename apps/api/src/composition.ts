@@ -7,6 +7,13 @@ import {
   type ToolCall
 } from "@unified-ai/contracts";
 import { LocalEvidenceStore } from "@unified-ai/evidence-index";
+import {
+  DashboardAdapterRegistry,
+  DashboardService,
+  FixtureDashboardAdapter,
+  QlikDashboardAdapter,
+  loadDashboardSample
+} from "@unified-ai/dashboard-builder";
 import { OllamaClient } from "@unified-ai/ollama-client";
 import { PolicyEngine } from "@unified-ai/policy-engine";
 import {
@@ -28,6 +35,7 @@ import {
   type OrchestratorConfig
 } from "./config.js";
 import { CompositeToolRegistry, PortfolioToolRegistry } from "./portfolio-tools.js";
+import type { DashboardBuilderRouteContext } from "./dashboard-builder-routes.js";
 
 const PORTFOLIO_GITHUB_OWNER = "yashumani";
 const PORTFOLIO_ORCHESTRATOR_REPOSITORY =
@@ -41,6 +49,7 @@ export interface OrchestratorServices {
   repositoryTools: RepositoryToolRegistry;
   tools: RepositoryToolPort;
   evidence: LocalEvidenceStore;
+  dashboardBuilder: DashboardBuilderRouteContext;
   portfolio: PortfolioService;
   agent: AgentRunner;
   runtime: RuntimeManager;
@@ -136,6 +145,22 @@ export async function createServices(
     repositoryRoot: config.repositoryRoot
   });
   await evidence.initialize();
+  const dashboardSample = await loadDashboardSample(config.repositoryRoot);
+  const dashboardService = new DashboardService({
+    evidence,
+    adapters: new DashboardAdapterRegistry([
+      new FixtureDashboardAdapter(dashboardSample.fixture),
+      new QlikDashboardAdapter({ enabled: false })
+    ])
+  });
+  await dashboardService.initialize();
+  const dashboardBuilder: DashboardBuilderRouteContext = {
+    service: dashboardService,
+    sample: {
+      manifest: dashboardSample.manifest,
+      manifestBytes: dashboardSample.manifestBytes
+    }
+  };
   const github = new GitHubRestClient({
     credentials: {
       getToken: async () => {
@@ -242,6 +267,7 @@ export async function createServices(
     repositoryTools,
     tools,
     evidence,
+    dashboardBuilder,
     portfolio,
     agent,
     runtime
