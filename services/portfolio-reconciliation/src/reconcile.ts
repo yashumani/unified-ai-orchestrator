@@ -189,6 +189,7 @@ export function evaluateRecommendation(input: {
     confidence.weightedConfidence >= 0.9 &&
     isComplete(input.profile) &&
     allCitationsValid &&
+    confidence.classifierAgreement === 1 &&
     eligibleActions.includes(action) &&
     input.profile.contradictions.length === 0;
   const lifecycle =

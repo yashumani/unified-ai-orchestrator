@@ -1,20 +1,25 @@
 import {
   AgentRunReceiptSchema,
   EvidenceReceiptSchema,
+  PortfolioRunCheckpointSchema,
+  PortfolioRunSchema,
+  RecommendationDecisionEventSchema,
   Sha256Schema,
   StableIdSchema,
   type AgentRunReceipt,
-  type EvidenceReceipt
+  type EvidenceReceipt,
+  type PortfolioRun,
+  type PortfolioRunCheckpoint,
+  type RecommendationDecisionEvent
 } from "@unified-ai/contracts";
 import { randomUUID } from "node:crypto";
 import {
-  access,
+  link,
   lstat,
   mkdir,
   readdir,
   readFile,
   realpath,
-  rename,
   rm,
   writeFile
 } from "node:fs/promises";
@@ -33,6 +38,8 @@ export interface StoredObject {
 
 const DEFAULT_AGENT_RUN_RECEIPT_LIMIT = 20;
 const MAX_AGENT_RUN_RECEIPT_LIMIT = 100;
+const DEFAULT_PORTFOLIO_ARTIFACT_LIMIT = 20;
+const MAX_PORTFOLIO_ARTIFACT_LIMIT = 100;
 
 interface DirectoryIdentity {
   dev: number;
@@ -60,12 +67,15 @@ export function resolveWithinRoot(root: string, ...segments: string[]): string {
   return candidate;
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
+function assertListLimit(limit: number, label: string): void {
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_PORTFOLIO_ARTIFACT_LIMIT
+  ) {
+    throw new Error(
+      `${label} limit must be an integer from 1 to ${MAX_PORTFOLIO_ARTIFACT_LIMIT}`
+    );
   }
 }
 
@@ -336,6 +346,163 @@ export class LocalEvidenceStore {
       .slice(0, limit);
   }
 
+  async putPortfolioRun(run: PortfolioRun): Promise<StoredObject> {
+    const parsed = PortfolioRunSchema.parse(run);
+    const runId = StableIdSchema.parse(parsed.runId);
+    return this.#putChecksummedRecord(["portfolio-runs"], runId, parsed);
+  }
+
+  async readPortfolioRun(runId: string): Promise<PortfolioRun> {
+    const parsedRunId = StableIdSchema.parse(runId);
+    return this.#readChecksummedRecord(
+      ["portfolio-runs"],
+      parsedRunId,
+      (value) => PortfolioRunSchema.parse(value),
+      (run) => {
+        if (run.runId !== parsedRunId) {
+          throw new Error("portfolio run failed its path identity integrity check");
+        }
+      },
+      "portfolio run"
+    );
+  }
+
+  async listPortfolioRuns(
+    limit = DEFAULT_PORTFOLIO_ARTIFACT_LIMIT
+  ): Promise<PortfolioRun[]> {
+    assertListLimit(limit, "portfolio run");
+    const ids = await this.#listRecordIds(["portfolio-runs"], "portfolio run");
+    const runs = await Promise.all(ids.map((runId) => this.readPortfolioRun(runId)));
+    return runs
+      .sort((first, second) => {
+        const createdOrder =
+          Date.parse(second.createdAt) - Date.parse(first.createdAt);
+        return createdOrder !== 0
+          ? createdOrder
+          : second.runId.localeCompare(first.runId);
+      })
+      .slice(0, limit);
+  }
+
+  async putPortfolioRunCheckpoint(
+    checkpoint: PortfolioRunCheckpoint
+  ): Promise<StoredObject> {
+    const parsed = PortfolioRunCheckpointSchema.parse(checkpoint);
+    const runId = StableIdSchema.parse(parsed.runId);
+    const checkpointId = StableIdSchema.parse(parsed.checkpointId);
+    return this.#putChecksummedRecord(
+      ["portfolio-run-checkpoints", runId],
+      checkpointId,
+      parsed
+    );
+  }
+
+  async readPortfolioRunCheckpoint(
+    runId: string,
+    checkpointId: string
+  ): Promise<PortfolioRunCheckpoint> {
+    const parsedRunId = StableIdSchema.parse(runId);
+    const parsedCheckpointId = StableIdSchema.parse(checkpointId);
+    return this.#readChecksummedRecord(
+      ["portfolio-run-checkpoints", parsedRunId],
+      parsedCheckpointId,
+      (value) => PortfolioRunCheckpointSchema.parse(value),
+      (checkpoint) => {
+        if (
+          checkpoint.runId !== parsedRunId ||
+          checkpoint.checkpointId !== parsedCheckpointId
+        ) {
+          throw new Error(
+            "portfolio run checkpoint failed its path identity integrity check"
+          );
+        }
+      },
+      "portfolio run checkpoint"
+    );
+  }
+
+  async listPortfolioRunCheckpoints(
+    runId: string,
+    limit = DEFAULT_PORTFOLIO_ARTIFACT_LIMIT
+  ): Promise<PortfolioRunCheckpoint[]> {
+    const parsedRunId = StableIdSchema.parse(runId);
+    assertListLimit(limit, "portfolio run checkpoint");
+    const ids = await this.#listRecordIds(
+      ["portfolio-run-checkpoints", parsedRunId],
+      "portfolio run checkpoint"
+    );
+    const checkpoints = await Promise.all(
+      ids.map((checkpointId) =>
+        this.readPortfolioRunCheckpoint(parsedRunId, checkpointId)
+      )
+    );
+    return checkpoints
+      .sort((first, second) => {
+        const sequenceOrder = first.sequence - second.sequence;
+        return sequenceOrder !== 0
+          ? sequenceOrder
+          : first.checkpointId.localeCompare(second.checkpointId);
+      })
+      .slice(0, limit);
+  }
+
+  async putRecommendationDecisionEvent(
+    event: RecommendationDecisionEvent
+  ): Promise<StoredObject> {
+    const parsed = RecommendationDecisionEventSchema.parse(event);
+    const eventId = StableIdSchema.parse(parsed.eventId);
+    return this.#putChecksummedRecord(
+      ["recommendation-decision-events"],
+      eventId,
+      parsed
+    );
+  }
+
+  async readRecommendationDecisionEvent(
+    eventId: string
+  ): Promise<RecommendationDecisionEvent> {
+    const parsedEventId = StableIdSchema.parse(eventId);
+    return this.#readChecksummedRecord(
+      ["recommendation-decision-events"],
+      parsedEventId,
+      (value) => RecommendationDecisionEventSchema.parse(value),
+      (event) => {
+        if (event.eventId !== parsedEventId) {
+          throw new Error(
+            "recommendation decision event failed its path identity integrity check"
+          );
+        }
+      },
+      "recommendation decision event"
+    );
+  }
+
+  async listRecommendationDecisionEvents(
+    limit = DEFAULT_PORTFOLIO_ARTIFACT_LIMIT
+  ): Promise<RecommendationDecisionEvent[]> {
+    assertListLimit(limit, "recommendation decision event");
+    const ids = await this.#listRecordIds(
+      ["recommendation-decision-events"],
+      "recommendation decision event"
+    );
+    const events = await Promise.all(
+      ids.map((eventId) => this.readRecommendationDecisionEvent(eventId))
+    );
+    return events
+      .sort((first, second) => {
+        const occurredOrder =
+          Date.parse(first.occurredAt) - Date.parse(second.occurredAt);
+        if (occurredOrder !== 0) {
+          return occurredOrder;
+        }
+        const sequenceOrder = first.sequence - second.sequence;
+        return sequenceOrder !== 0
+          ? sequenceOrder
+          : first.eventId.localeCompare(second.eventId);
+      })
+      .slice(0, limit);
+  }
+
   async #rootPath(): Promise<string> {
     await this.initialize();
     return this.#realRoot as string;
@@ -363,13 +530,155 @@ export class LocalEvidenceStore {
     }
   }
 
+  async #putChecksummedRecord(
+    directorySegments: readonly string[],
+    id: string,
+    value: unknown
+  ): Promise<StoredObject> {
+    const canonical = canonicalJson(value);
+    const sha256 = sha256Hex(canonical);
+    const root = await this.#rootPath();
+    const target = resolveWithinRoot(
+      root,
+      ...directorySegments,
+      `${id}.json`
+    );
+    const checksumTarget = resolveWithinRoot(
+      root,
+      ...directorySegments,
+      `${id}.sha256`
+    );
+
+    await this.#writeImmutable(target, canonical);
+    await this.#writeImmutable(checksumTarget, sha256);
+
+    return {
+      sha256,
+      relativePath: relative(root, target).replaceAll("\\", "/")
+    };
+  }
+
+  async #readChecksummedRecord<T>(
+    directorySegments: readonly string[],
+    id: string,
+    parse: (value: unknown) => T,
+    assertIdentity: (value: T) => void,
+    label: string
+  ): Promise<T> {
+    const root = await this.#rootPath();
+    const target = resolveWithinRoot(
+      root,
+      ...directorySegments,
+      `${id}.json`
+    );
+    const checksumTarget = resolveWithinRoot(
+      root,
+      ...directorySegments,
+      `${id}.sha256`
+    );
+    const content = await this.#readImmutableFile(target, label);
+    const expectedSha256 = Sha256Schema.parse(
+      await this.#readImmutableFile(checksumTarget, `${label} checksum`)
+    );
+    if (sha256Hex(content) !== expectedSha256) {
+      throw new Error(`${label} failed its content-addressed integrity check`);
+    }
+
+    const parsed = parse(JSON.parse(content) as unknown);
+    assertIdentity(parsed);
+    if (content !== canonicalJson(parsed)) {
+      throw new Error(`${label} failed its canonical integrity check`);
+    }
+    return parsed;
+  }
+
+  async #listRecordIds(
+    directorySegments: readonly string[],
+    label: string
+  ): Promise<string[]> {
+    const root = await this.#rootPath();
+    const directory = resolveWithinRoot(root, ...directorySegments);
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} directory cannot be a symbolic link or junction`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`${label} path must be a directory`);
+    }
+    const realDirectory = await realpath(directory);
+    this.#assertContained(realDirectory);
+    const entries = await readdir(realDirectory, { withFileTypes: true });
+    const ids: string[] = [];
+    for (const entry of entries) {
+      if (!entry.name.endsWith(".json")) {
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        throw new Error(`${label} cannot be a symbolic link or junction`);
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const id = entry.name.slice(0, -".json".length);
+      if (StableIdSchema.safeParse(id).success) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  async #readImmutableFile(target: string, label: string): Promise<string> {
+    const stats = await lstat(target);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} cannot be a symbolic link or junction`);
+    }
+    if (!stats.isFile()) {
+      throw new Error(`${label} must be a regular file`);
+    }
+    const realTarget = await realpath(target);
+    this.#assertContained(realTarget);
+    return readFile(realTarget, "utf8");
+  }
+
+  async #readExistingImmutableFile(target: string): Promise<string | undefined> {
+    let stats;
+    try {
+      stats = await lstat(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(
+        "an immutable evidence target cannot be a symbolic link or junction"
+      );
+    }
+    if (!stats.isFile()) {
+      throw new Error("an immutable evidence target must be a regular file");
+    }
+    const realTarget = await realpath(target);
+    this.#assertContained(realTarget);
+    return readFile(realTarget, "utf8");
+  }
+
   async #writeImmutable(target: string, content: string): Promise<void> {
     const parent = dirname(target);
     const realParent = await this.#ensureContainedDirectory(parent);
     const safeTarget = resolveWithinRoot(realParent, basename(target));
 
-    if (await exists(safeTarget)) {
-      const existing = await readFile(safeTarget, "utf8");
+    const existingBeforeWrite = await this.#readExistingImmutableFile(safeTarget);
+    if (existingBeforeWrite !== undefined) {
+      const existing = existingBeforeWrite;
       if (existing !== content) {
         throw new Error("immutable evidence path already contains different content");
       }
@@ -388,13 +697,14 @@ export class LocalEvidenceStore {
     });
 
     try {
-      await rename(temporary, safeTarget);
+      await link(temporary, safeTarget);
     } catch (error) {
-      if (await exists(safeTarget)) {
-        const existing = await readFile(safeTarget, "utf8");
-        if (existing === content) {
-          return;
-        }
+      const existing = await this.#readExistingImmutableFile(safeTarget);
+      if (existing === content) {
+        return;
+      }
+      if (existing !== undefined) {
+        throw new Error("immutable evidence path already contains different content");
       }
       throw error;
     } finally {

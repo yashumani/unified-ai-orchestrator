@@ -2,9 +2,15 @@ import {
   AgentRunReceiptSchema,
   EvidenceReceiptSchema,
   PINNED_OLLAMA_MODEL,
+  PortfolioRunCheckpointSchema,
+  PortfolioRunSchema,
+  RecommendationDecisionEventSchema,
   SCHEMA_VERSION,
   type AgentRunReceipt,
-  type EvidenceReceipt
+  type EvidenceReceipt,
+  type PortfolioRun,
+  type PortfolioRunCheckpoint,
+  type RecommendationDecisionEvent
 } from "@unified-ai/contracts";
 import {
   mkdtemp,
@@ -75,6 +81,71 @@ function makeAgentRunReceipt(
     inputObjectSha256: "a".repeat(64),
     outputObjectSha256: "b".repeat(64),
     warnings: [],
+    ...overrides
+  });
+}
+
+const portfolioCapturedAt = "2026-08-28T20:00:00.000Z";
+const portfolioRepository = {
+  repositoryId: "repository-alpha",
+  capturedRevision: "b".repeat(40),
+  capturedAt: portfolioCapturedAt,
+  evidenceObjectSha256: "a".repeat(64)
+} as const;
+
+function makePortfolioRun(
+  runId: string,
+  overrides: Partial<PortfolioRun> = {}
+): PortfolioRun {
+  return PortfolioRunSchema.parse({
+    schemaVersion: SCHEMA_VERSION,
+    runId,
+    createdAt: portfolioCapturedAt,
+    evidenceObjectSha256: "c".repeat(64),
+    repositories: [portfolioRepository],
+    ...overrides
+  });
+}
+
+function makePortfolioCheckpoint(
+  checkpointId: string,
+  sequence: number,
+  overrides: Partial<PortfolioRunCheckpoint> = {}
+): PortfolioRunCheckpoint {
+  return PortfolioRunCheckpointSchema.parse({
+    schemaVersion: SCHEMA_VERSION,
+    checkpointId,
+    runId: "portfolio-run-alpha",
+    sequence,
+    status: "running",
+    occurredAt: portfolioCapturedAt,
+    evidenceObjectSha256: "d".repeat(64),
+    repositories: [portfolioRepository],
+    errors: [],
+    ...overrides
+  });
+}
+
+function makeRecommendationDecisionEvent(
+  eventId: string,
+  sequence: number,
+  overrides: Partial<RecommendationDecisionEvent> = {}
+): RecommendationDecisionEvent {
+  return RecommendationDecisionEventSchema.parse({
+    schemaVersion: SCHEMA_VERSION,
+    eventId,
+    recommendationId: "recommendation-alpha",
+    runId: "portfolio-run-alpha",
+    sequence,
+    actor: "system",
+    lifecycle: "draft",
+    action: "keep-standalone",
+    occurredAt: portfolioCapturedAt,
+    recommendationObjectSha256: "e".repeat(64),
+    evidenceObjectSha256: "f".repeat(64),
+    receiptObjectSha256: "1".repeat(64),
+    repositories: [portfolioRepository],
+    reason: "Synthetic deterministic recommendation event.",
     ...overrides
   });
 }
@@ -410,6 +481,231 @@ describe("local evidence store", () => {
     expect(receipts).toHaveLength(2);
     expect(receipts.every((receipt) => AgentRunReceiptSchema.safeParse(receipt).success)).toBe(
       true
+    );
+  });
+
+  it("round-trips immutable portfolio runs with checksum sidecars", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const run = makePortfolioRun("portfolio-run-alpha");
+
+    const first = await store.putPortfolioRun(run);
+    const duplicate = await store.putPortfolioRun(run);
+
+    expect(duplicate).toEqual(first);
+    expect(first.relativePath).toBe("portfolio-runs/portfolio-run-alpha.json");
+    expect(await store.readPortfolioRun(run.runId)).toEqual(run);
+    expect(await store.listPortfolioRuns()).toEqual([run]);
+    expect(
+      await readFile(
+        join(
+          repositoryRoot,
+          ".local",
+          "evidence",
+          "portfolio-runs",
+          "portfolio-run-alpha.sha256"
+        ),
+        "utf8"
+      )
+    ).toBe(first.sha256);
+  });
+
+  it("atomically rejects conflicting concurrent portfolio run IDs", async () => {
+    const { store } = await makeStore();
+    const first = makePortfolioRun("portfolio-run-conflict");
+    const second = makePortfolioRun("portfolio-run-conflict", {
+      evidenceObjectSha256: "9".repeat(64)
+    });
+
+    const results = await Promise.allSettled([
+      store.putPortfolioRun(first),
+      store.putPortfolioRun(second)
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const stored = await store.readPortfolioRun(first.runId);
+    expect([first, second]).toContainEqual(stored);
+  });
+
+  it("detects checksum, canonical, and path-identity tampering in portfolio runs", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const run = makePortfolioRun("portfolio-run-tampered");
+    const stored = await store.putPortfolioRun(run);
+    const target = join(repositoryRoot, ".local", "evidence", stored.relativePath);
+    const checksumTarget = target.replace(/\.json$/u, ".sha256");
+
+    await writeFile(target, canonicalJson({ ...run, evidenceObjectSha256: "8".repeat(64) }), "utf8");
+    await expect(store.readPortfolioRun(run.runId)).rejects.toThrow(/integrity/u);
+
+    const pretty = JSON.stringify(run, null, 2);
+    await writeFile(target, pretty, "utf8");
+    await writeFile(checksumTarget, sha256Hex(pretty), "utf8");
+    await expect(store.readPortfolioRun(run.runId)).rejects.toThrow(/canonical/u);
+
+    const wrongIdentity = makePortfolioRun("portfolio-run-other");
+    const wrongCanonical = canonicalJson(wrongIdentity);
+    await writeFile(target, wrongCanonical, "utf8");
+    await writeFile(checksumTarget, sha256Hex(wrongCanonical), "utf8");
+    await expect(store.readPortfolioRun(run.runId)).rejects.toThrow(/path identity/u);
+  });
+
+  it("rejects invalid portfolio run IDs and enforces list bounds", async () => {
+    const { store } = await makeStore();
+
+    await expect(store.readPortfolioRun("../escape")).rejects.toThrow();
+    await expect(
+      store.putPortfolioRun({
+        ...makePortfolioRun("portfolio-run-safe"),
+        runId: "../escape"
+      } as PortfolioRun)
+    ).rejects.toThrow();
+    await expect(store.listPortfolioRuns(0)).rejects.toThrow(/limit/u);
+    await expect(store.listPortfolioRuns(101)).rejects.toThrow(/limit/u);
+    await expect(store.listPortfolioRuns(1.5)).rejects.toThrow(/limit/u);
+  });
+
+  it("stores portfolio run checkpoints as an append-only ordered stream", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const later = makePortfolioCheckpoint("checkpoint-later", 2, {
+      status: "succeeded"
+    });
+    const earlier = makePortfolioCheckpoint("checkpoint-earlier", 1);
+
+    await store.putPortfolioRunCheckpoint(later);
+    await store.putPortfolioRunCheckpoint(earlier);
+
+    expect(
+      await store.readPortfolioRunCheckpoint(earlier.runId, earlier.checkpointId)
+    ).toEqual(earlier);
+    expect(await store.listPortfolioRunCheckpoints(earlier.runId)).toEqual([
+      earlier,
+      later
+    ]);
+    expect(
+      await readdir(
+        join(
+          repositoryRoot,
+          ".local",
+          "evidence",
+          "portfolio-run-checkpoints",
+          earlier.runId
+        )
+      )
+    ).not.toContain("current.json");
+    await expect(store.listPortfolioRunCheckpoints(earlier.runId, 0)).rejects.toThrow(
+      /limit/u
+    );
+    await expect(store.listPortfolioRunCheckpoints(earlier.runId, 101)).rejects.toThrow(
+      /limit/u
+    );
+  });
+
+  it("accepts identical checkpoint retries and rejects conflicting checkpoint IDs", async () => {
+    const { store } = await makeStore();
+    const checkpoint = makePortfolioCheckpoint("checkpoint-conflict", 1);
+
+    const [first, duplicate] = await Promise.all([
+      store.putPortfolioRunCheckpoint(checkpoint),
+      store.putPortfolioRunCheckpoint(checkpoint)
+    ]);
+    expect(duplicate).toEqual(first);
+    await expect(
+      store.putPortfolioRunCheckpoint({
+        ...checkpoint,
+        status: "failed"
+      })
+    ).rejects.toThrow(/immutable/u);
+  });
+
+  it("stores recommendation decisions idempotently and rejects conflicting events", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const event = makeRecommendationDecisionEvent("decision-event-alpha", 1);
+
+    const [first, duplicate] = await Promise.all([
+      store.putRecommendationDecisionEvent(event),
+      store.putRecommendationDecisionEvent(event)
+    ]);
+    expect(duplicate).toEqual(first);
+    expect(first.relativePath).toBe(
+      "recommendation-decision-events/decision-event-alpha.json"
+    );
+    expect(await store.readRecommendationDecisionEvent(event.eventId)).toEqual(event);
+    expect(await store.listRecommendationDecisionEvents()).toEqual([event]);
+    expect(
+      await readFile(
+        join(
+          repositoryRoot,
+          ".local",
+          "evidence",
+          "recommendation-decision-events",
+          "decision-event-alpha.sha256"
+        ),
+        "utf8"
+      )
+    ).toBe(first.sha256);
+
+    await expect(
+      store.putRecommendationDecisionEvent({
+        ...event,
+        reason: "Conflicting immutable event content."
+      })
+    ).rejects.toThrow(/immutable/u);
+  });
+
+  it("rejects invalid decision event IDs and enforces event list bounds", async () => {
+    const { store } = await makeStore();
+
+    await expect(store.readRecommendationDecisionEvent("../escape")).rejects.toThrow();
+    await expect(
+      store.putRecommendationDecisionEvent({
+        ...makeRecommendationDecisionEvent("decision-event-safe", 1),
+        eventId: "../escape"
+      } as RecommendationDecisionEvent)
+    ).rejects.toThrow();
+    await expect(store.listRecommendationDecisionEvents(0)).rejects.toThrow(/limit/u);
+    await expect(store.listRecommendationDecisionEvents(101)).rejects.toThrow(/limit/u);
+    await expect(store.listRecommendationDecisionEvents(1.5)).rejects.toThrow(/limit/u);
+  });
+
+  it("rejects a decision event whose valid content does not match its path identity", async () => {
+    const { repositoryRoot, store } = await makeStore();
+    const event = makeRecommendationDecisionEvent("decision-event-path", 1);
+    const stored = await store.putRecommendationDecisionEvent(event);
+    const target = join(repositoryRoot, ".local", "evidence", stored.relativePath);
+    const checksumTarget = target.replace(/\.json$/u, ".sha256");
+    const wrongIdentity = canonicalJson({
+      ...event,
+      eventId: "decision-event-other"
+    });
+    await writeFile(target, wrongIdentity, "utf8");
+    await writeFile(checksumTarget, sha256Hex(wrongIdentity), "utf8");
+
+    await expect(
+      store.readRecommendationDecisionEvent(event.eventId)
+    ).rejects.toThrow(/path identity/u);
+  });
+
+  it("rejects a typed artifact symlink even when its target stays inside the repository", async (context) => {
+    const { repositoryRoot, store } = await makeStore();
+    await store.initialize();
+    const evidenceRoot = join(repositoryRoot, ".local", "evidence");
+    const portfolioRoot = join(evidenceRoot, "portfolio-runs");
+    const source = join(evidenceRoot, "source.json");
+    await mkdir(portfolioRoot);
+    await writeFile(source, canonicalJson(makePortfolioRun("portfolio-run-link")), "utf8");
+
+    try {
+      await symlink(source, join(portfolioRoot, "portfolio-run-link.json"), "file");
+    } catch (error) {
+      if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(store.readPortfolioRun("portfolio-run-link")).rejects.toThrow(
+      /symbolic link|junction/u
     );
   });
 });
