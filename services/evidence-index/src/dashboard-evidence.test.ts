@@ -139,6 +139,7 @@ describe("dashboard evidence records", () => {
     expect(history.map((value) => value.sequence)).toEqual(
       Array.from({ length: 101 }, (_, sequence) => sequence)
     );
+    await expect(store.listDashboardTemplateIds()).resolves.toEqual(["template-alpha"]);
     await expect(store.listDashboardImportReceipts("template-alpha")).resolves.toEqual([
       imported
     ]);

@@ -524,6 +524,44 @@ export class LocalEvidenceStore {
     );
   }
 
+  async listDashboardTemplateIds(): Promise<string[]> {
+    const root = await this.#rootPath();
+    const directory = resolveWithinRoot(root, "dashboard-templates");
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error(
+        "dashboard template directory cannot be a symbolic link, junction, or file"
+      );
+    }
+    const realDirectory = await realpath(directory);
+    this.#assertContained(realDirectory);
+    const entries = await readdir(realDirectory, { withFileTypes: true });
+    const templateIds: string[] = [];
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          "dashboard template directory cannot contain a symbolic link or junction"
+        );
+      }
+      if (!entry.isDirectory()) {
+        throw new Error("dashboard template directory contains an unexpected file");
+      }
+      if (!StableIdSchema.safeParse(entry.name).success) {
+        throw new Error("dashboard template directory contains an invalid identifier");
+      }
+      templateIds.push(entry.name);
+    }
+    return templateIds.sort((left, right) => left.localeCompare(right));
+  }
+
   async readDashboardTemplateEvent(
     templateId: string,
     eventId: string
