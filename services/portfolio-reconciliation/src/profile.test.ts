@@ -78,7 +78,32 @@ function fixtureSnapshot(
         authorLogin: "fixture-user"
       }
     ],
-    openIssues: [],
+    openIssues: [
+      {
+        id: 12,
+        number: 12,
+        kind: "issue",
+        title: "Complete the deployment path",
+        state: "open",
+        updatedAt: "2026-08-28T00:00:00.000Z",
+        createdAt: "2026-08-27T00:00:00.000Z",
+        closedAt: null,
+        authorLogin: "fixture-user",
+        headSha: null,
+        baseSha: null,
+        comments: [
+          {
+            id: 1201,
+            body: "Deployment remains incomplete and needs an acceptance run.",
+            createdAt: "2026-08-28T00:00:00.000Z",
+            updatedAt: "2026-08-28T00:00:00.000Z",
+            authorLogin: "fixture-reviewer"
+          }
+        ],
+        reviews: [],
+        reviewComments: []
+      }
+    ],
     openPullRequests: [],
     recentlyClosedWorkItems: [],
     gaps: []
@@ -114,6 +139,23 @@ describe("deterministic repository profiling", () => {
     );
     expect(result.deterministic.capabilities).toEqual(
       expect.arrayContaining(["evidence", "knowledge", "orchestration"])
+    );
+    expect(result.deterministic.classificationSignals).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "documentation README.md: A local evidence and knowledge orchestration dashboard."
+        ),
+        expect.stringContaining("recent commit: Synthetic commit"),
+        expect.stringContaining(
+          "issue #12 comment: Deployment remains incomplete"
+        )
+      ])
+    );
+    expect(
+      result.citations.find((citation) => citation.family === "documentation")
+        ?.statement
+    ).toContain(
+      "documented purpose: A local evidence and knowledge orchestration dashboard."
     );
     expect(JSON.stringify(result.citations)).not.toContain(
       "push changes"

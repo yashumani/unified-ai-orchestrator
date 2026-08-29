@@ -60,6 +60,7 @@ function profile(
     purpose: "local AI orchestration",
     capabilities: ["orchestration", "evidence", "local model runtime"],
     technologyTags: ["typescript"],
+    classificationSignals: [],
     evidenceFamilies: familyStates(),
     citations: [citation(repositoryId, `citation-${repositoryId}`)],
     contradictions: [],

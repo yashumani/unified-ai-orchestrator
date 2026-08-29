@@ -26,6 +26,7 @@ export interface DeterministicRepositoryProfile {
   purpose: string;
   capabilities: string[];
   technologyTags: string[];
+  classificationSignals: string[];
   evidenceFamilies: Record<EvidenceFamily, EvidenceFamilyState>;
   citations: RepositoryCitation[];
   contradictions: string[];

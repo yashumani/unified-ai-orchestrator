@@ -188,13 +188,103 @@ function familyStates(
   return states;
 }
 
-function boundedText(value: string): string {
+function boundedText(value: string, maxLength = 300): string {
   return value
     .replace(/https?:\/\/\S+/giu, "[link]")
-    .replace(/\b(?:ghp_|github_pat_)[A-Za-z0-9_]+\b/gu, "[credential]")
+    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_=-]+\b/gu, "[credential]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/giu, "Bearer [credential]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[email]")
+    .replace(/[\u0000-\u001f\u007f]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim()
-    .slice(0, 300);
+    .slice(0, maxLength);
+}
+
+function shortSignal(label: string, value: string): string | null {
+  const sanitized = boundedText(value, 180);
+  return sanitized.length === 0 ? null : `${label}: ${sanitized}`;
+}
+
+function classificationSignals(
+  snapshot: RepositoryPortfolioSnapshot
+): string[] {
+  const documentationSignals = snapshot.files
+    .filter(
+      (file) =>
+        (file.kind === "readme" || file.kind === "documentation") &&
+        file.content !== null
+    )
+    .flatMap((file) =>
+      (file.content ?? "")
+        .split(/\r?\n/gu)
+        .map((line) => line.replace(/^#+\s*/u, "").trim())
+        .filter((line) => line.length >= 8)
+        .slice(0, 4)
+        .map((line) => shortSignal(`documentation ${file.path}`, line))
+    )
+    .filter((signal): signal is string => signal !== null);
+  const commitSignals = snapshot.recentCommits
+    .slice(0, 12)
+    .map((commit) =>
+      shortSignal("recent commit", commit.message.split(/\r?\n/gu)[0] ?? "")
+    )
+    .filter((signal): signal is string => signal !== null);
+  const workItems = [
+    ...snapshot.openIssues,
+    ...snapshot.openPullRequests,
+    ...snapshot.recentlyClosedWorkItems
+  ].filter(
+    (item, index, items) =>
+      items.findIndex(
+        (candidate) =>
+          candidate.kind === item.kind && candidate.number === item.number
+      ) === index
+  ).slice(0, 16);
+  const workItemTitleSignals = workItems
+    .map((item) =>
+      shortSignal(`${item.state} ${item.kind} #${item.number}`, item.title)
+    )
+    .filter((signal): signal is string => signal !== null);
+  const discussionSignals = workItems.flatMap((item) =>
+    ([
+      ["comment", item.comments],
+      ["review", item.reviews],
+      ["review comment", item.reviewComments]
+    ] as const).flatMap(([kind, entries]) =>
+      entries
+        .slice(-2)
+        .reverse()
+        .map((entry) =>
+          shortSignal(
+            `${item.kind} #${item.number} ${kind}`,
+            entry.body ?? ""
+          )
+        )
+        .filter((signal): signal is string => signal !== null)
+    )
+  );
+  const artifactPathSignals = snapshot.files
+    .map((file) => shortSignal(`${file.kind} path`, file.path))
+    .filter((signal): signal is string => signal !== null);
+  const preferred = [
+    ...documentationSignals.slice(0, 4),
+    ...commitSignals.slice(0, 8),
+    ...workItemTitleSignals.slice(0, 8),
+    ...discussionSignals.slice(0, 8),
+    ...artifactPathSignals.slice(0, 4)
+  ];
+  const fallback = [
+    ...documentationSignals,
+    ...commitSignals,
+    ...workItemTitleSignals,
+    ...discussionSignals,
+    ...artifactPathSignals
+  ];
+  return [
+    ...new Map(
+      [...preferred, ...fallback].map((signal) => [signal.toLowerCase(), signal])
+    ).values()
+  ].slice(0, 32);
 }
 
 function documentedPurpose(
@@ -204,15 +294,17 @@ function documentedPurpose(
   const readme = snapshot.files.find(
     (file) => file.kind === "readme" && file.content !== null
   )?.content;
-  const usefulLine = readme
+  const lines = readme
     ?.split(/\r?\n/gu)
-    .map((line) => line.replace(/^#+\s*/u, "").trim())
-    .find(
-      (line) =>
-        line.length >= 12 &&
-        !/^[-=![`#]/u.test(line) &&
-        !/^badges?\b/iu.test(line)
+    .map((raw) => ({ raw, text: raw.replace(/^#+\s*/u, "").trim() }))
+    .filter(
+      ({ text }) =>
+        text.length >= 12 &&
+        !/^[-=![`#]/u.test(text) &&
+        !/^badges?\b/iu.test(text)
     );
+  const usefulLine =
+    lines?.find(({ raw }) => !/^\s*#/u.test(raw))?.text ?? lines?.[0]?.text;
   if (usefulLine !== undefined) {
     return boundedText(usefulLine);
   }
@@ -249,17 +341,66 @@ function technologyTags(snapshot: RepositoryPortfolioSnapshot): string[] {
   ]).slice(0, 100);
 }
 
-function familySummary(
-  family: EvidenceFamily,
-  payload: unknown,
-  state: EvidenceFamilyState
+function summarizedPaths(
+  files: readonly RepositoryFileEvidence[],
+  kinds: readonly RepositoryFileEvidence["kind"][]
 ): string {
-  const itemCount = Array.isArray(payload)
-    ? payload.length
-    : typeof payload === "object" && payload !== null
-      ? Object.keys(payload).length
-      : 1;
-  return `${family} query ${state}; ${itemCount} bounded evidence field${itemCount === 1 ? "" : "s"} recorded.`;
+  const paths = files
+    .filter((file) => kinds.includes(file.kind))
+    .map((file) => boundedText(file.path, 100))
+    .slice(0, 8);
+  return paths.length === 0 ? "none found" : paths.join(", ");
+}
+
+function familySummary(input: {
+  family: EvidenceFamily;
+  inventory: RepositoryInventoryItem;
+  snapshot: RepositoryPortfolioSnapshot;
+  state: EvidenceFamilyState;
+  purpose: string;
+}): string {
+  const prefix = `${input.family} query ${input.state}`;
+  const { inventory, snapshot } = input;
+  switch (input.family) {
+    case "identity":
+      return boundedText(
+        `${prefix}; visibility ${snapshot.visibility ?? inventory.visibility}; archived ${inventory.archived}; topics ${snapshot.topics.slice(0, 8).join(", ") || "none"}; languages ${Object.keys(snapshot.languages).slice(0, 8).join(", ") || "none"}; license ${snapshot.license?.spdxId ?? "unknown"}.`
+      );
+    case "default-branch":
+      return boundedText(
+        `${prefix}; branch ${snapshot.defaultBranch ?? inventory.defaultBranch}; before/after revision ${snapshot.beforeRef?.commitSha === snapshot.afterRef?.commitSha && snapshot.beforeRef?.treeSha === snapshot.afterRef?.treeSha ? "matched" : "did not match"}; capture attempts ${snapshot.attempts}.`
+      );
+    case "documentation":
+      return boundedText(
+        `${prefix}; documented purpose: ${input.purpose}; paths ${summarizedPaths(snapshot.files, ["readme", "documentation"])}.`
+      );
+    case "manifests":
+      return boundedText(
+        `${prefix}; manifest paths ${summarizedPaths(snapshot.files, ["manifest"])}.`
+      );
+    case "workflows":
+      return boundedText(
+        `${prefix}; workflow and deployment paths ${summarizedPaths(snapshot.files, ["workflow", "deployment"])}.`
+      );
+    case "releases":
+      return boundedText(
+        `${prefix}; ${snapshot.releases.length} releases captured; latest tag ${snapshot.releases[0]?.tagName ?? "none"}.`
+      );
+    case "commits":
+      return boundedText(
+        `${prefix}; ${snapshot.recentCommits.length} recent commits captured; latest timestamp ${snapshot.recentCommits[0]?.committedAt ?? snapshot.recentCommits[0]?.authoredAt ?? "unknown"}; subjects ${snapshot.recentCommits.slice(0, 3).map((commit) => commit.message.split(/\r?\n/gu)[0]).join(" | ") || "none"}.`
+      );
+    case "work-items": {
+      const workItems = [
+        ...snapshot.openIssues,
+        ...snapshot.openPullRequests,
+        ...snapshot.recentlyClosedWorkItems
+      ];
+      return boundedText(
+        `${prefix}; ${snapshot.openIssues.length} open issues, ${snapshot.openPullRequests.length} open pull requests, ${snapshot.recentlyClosedWorkItems.length} recently closed items; recent titles ${workItems.slice(0, 5).map((item) => item.title).join(" | ") || "none"}.`
+      );
+    }
+  }
 }
 
 export function buildRepositoryProfileArtifacts(input: {
@@ -272,6 +413,7 @@ export function buildRepositoryProfileArtifacts(input: {
   const revision = capturedRevision(input.snapshot);
   const states = familyStates(input.snapshot);
   const payloads = familyPayloads(input.inventory, input.snapshot);
+  const purpose = documentedPurpose(input.inventory, input.snapshot);
   const evidenceObjects = payloads.map((family) => {
     const value = {
       schemaVersion: SCHEMA_VERSION,
@@ -297,11 +439,13 @@ export function buildRepositoryProfileArtifacts(input: {
       capturedRevision: revision,
       capturedAt: input.capturedAt,
       evidenceObjectSha256,
-      summary: familySummary(
-        family.family,
-        family.payload,
-        states[family.family]
-      ),
+      summary: familySummary({
+        family: family.family,
+        inventory: input.inventory,
+        snapshot: input.snapshot,
+        state: states[family.family],
+        purpose
+      }),
       locator: family.locator
     });
   });
@@ -331,7 +475,6 @@ export function buildRepositoryProfileArtifacts(input: {
     evidence
   });
   const capabilities = detectCapabilities(input.snapshot);
-  const purpose = documentedPurpose(input.inventory, input.snapshot);
   const tags = technologyTags(input.snapshot);
   const profile = RepositoryProfileSchema.parse({
     schemaVersion: SCHEMA_VERSION,
@@ -363,6 +506,7 @@ export function buildRepositoryProfileArtifacts(input: {
       purpose,
       capabilities,
       technologyTags: tags,
+      classificationSignals: classificationSignals(input.snapshot),
       evidenceFamilies: states,
       citations,
       contradictions,

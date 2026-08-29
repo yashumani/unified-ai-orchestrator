@@ -22,6 +22,9 @@ function fixtureProfile(): DeterministicRepositoryProfile {
     purpose: "local AI orchestration",
     capabilities: ["orchestration", "evidence"],
     technologyTags: ["typescript"],
+    classificationSignals: [
+      "work-item-discussion: deployment was discussed as incomplete"
+    ],
     evidenceFamilies: Object.fromEntries(
       REQUIRED_EVIDENCE_FAMILIES.map((family) => [family, "complete"])
     ) as DeterministicRepositoryProfile["evidenceFamilies"],
@@ -79,6 +82,9 @@ describe("two-pass Ollama portfolio classifier", () => {
         additionalProperties: false
       });
       expect(request.messages[0]?.content).toContain("untrusted data");
+      expect(request.messages[1]?.content).toContain(
+        "deployment was discussed as incomplete"
+      );
     }
     expect(result.first?.action).toBe("keep-standalone");
     expect(result.second?.action).toBe("keep-standalone");

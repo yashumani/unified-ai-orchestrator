@@ -84,6 +84,7 @@ function classificationMessages(
           purpose: profile.purpose,
           capabilities: profile.capabilities,
           technologyTags: profile.technologyTags,
+          classificationSignals: profile.classificationSignals,
           visibility: profile.visibility,
           licenseSpdxId: profile.licenseSpdxId,
           archived: profile.archived,
