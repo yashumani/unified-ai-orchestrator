@@ -97,6 +97,59 @@ describe("OllamaClient probes", () => {
 });
 
 describe("OllamaClient streaming chat", () => {
+  it("runs schema-constrained portfolio classification with pinned local settings", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const resultJson = JSON.stringify({
+      purpose: "Local AI orchestration",
+      action: "keep-standalone",
+      rationale: "The stored evidence supports a standalone runtime.",
+      citationIds: ["citation-repo-alpha"]
+    });
+    const fetchImpl: OllamaFetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        `${JSON.stringify({
+          model: "qwen3:4b",
+          created_at: "2026-08-28T10:00:00.000Z",
+          message: { role: "assistant", content: resultJson },
+          done: true,
+          done_reason: "stop"
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    };
+    const client = new OllamaClient({ fetch: fetchImpl });
+    const format = {
+      type: "object",
+      properties: {
+        purpose: { type: "string" },
+        action: { type: "string", enum: ["keep-standalone"] },
+        rationale: { type: "string" },
+        citationIds: { type: "array", items: { type: "string" } }
+      },
+      required: ["purpose", "action", "rationale", "citationIds"],
+      additionalProperties: false
+    };
+
+    const result = await client.structuredChat({
+      messages: [{ role: "user", content: "Classify stored evidence." }],
+      format,
+      maxTokens: 512
+    });
+
+    expect(result.value).toEqual(JSON.parse(resultJson));
+    expect(requestBodies).toEqual([
+      expect.objectContaining({
+        model: "qwen3:4b",
+        stream: true,
+        think: false,
+        format,
+        options: { num_ctx: 4096, temperature: 0.2, num_predict: 512 }
+      })
+    ]);
+    expect(requestBodies[0]).not.toHaveProperty("tools");
+  });
+
   it("sends the fixed safe text request and normalizes streamed output", async () => {
     let requestUrl = "";
     let requestMethod: string | undefined;

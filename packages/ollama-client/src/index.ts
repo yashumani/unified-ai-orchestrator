@@ -14,6 +14,8 @@ export {
   type OllamaHealth,
   type OllamaModelInventory,
   type OllamaProbe,
+  type OllamaStructuredChatRequest,
+  type OllamaStructuredChatResult,
   type OllamaStreamEvent,
   type OllamaToolDefinition
 } from "./client.js";

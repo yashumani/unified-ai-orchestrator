@@ -68,6 +68,12 @@ export interface OllamaChatRequest {
   readonly tools?: readonly OllamaToolDefinition[];
 }
 
+export interface OllamaStructuredChatRequest {
+  readonly messages: readonly OllamaMessage[];
+  readonly format: Record<string, unknown>;
+  readonly maxTokens?: number;
+}
+
 export interface NormalizedOllamaToolCall {
   readonly name: RequestedToolName;
   readonly arguments: unknown;
@@ -122,6 +128,11 @@ type StructuredToolPlan = StructuredToolCallPlan | StructuredResponsePlan;
 
 interface StructuredChatResult {
   readonly content: string;
+  readonly metadata: OllamaCompletionMetadata;
+}
+
+export interface OllamaStructuredChatResult {
+  readonly value: unknown;
   readonly metadata: OllamaCompletionMetadata;
 }
 
@@ -745,6 +756,43 @@ export class OllamaClient {
     return inventory;
   }
 
+  async structuredChat(
+    request: OllamaStructuredChatRequest,
+    signal?: AbortSignal
+  ): Promise<OllamaStructuredChatResult> {
+    if (
+      typeof request.format !== "object" ||
+      request.format === null ||
+      Array.isArray(request.format)
+    ) {
+      throw configurationError("Structured chat requires a JSON schema object.");
+    }
+    const maxTokens = request.maxTokens ?? 1_024;
+    if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 4_096) {
+      throw configurationError(
+        "Structured chat maxTokens must be between 1 and 4096."
+      );
+    }
+    return await this.#withRequest(signal, async (requestSignal) => {
+      const result = await this.#collectStructuredChat(
+        request.messages,
+        request.format,
+        requestSignal,
+        {
+          temperature: OLLAMA_TEMPERATURE,
+          maxTokens
+        }
+      );
+      let value: unknown;
+      try {
+        value = JSON.parse(result.content) as unknown;
+      } catch {
+        throw invalidResponse("Ollama returned invalid structured JSON.");
+      }
+      return { value, metadata: result.metadata };
+    });
+  }
+
   async *streamChat(
     request: OllamaChatRequest,
     signal?: AbortSignal
@@ -902,7 +950,11 @@ export class OllamaClient {
   async #collectStructuredChat(
     messages: readonly OllamaMessage[],
     format: Record<string, unknown>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    options: {
+      temperature?: number;
+      maxTokens?: number;
+    } = {}
   ): Promise<StructuredChatResult> {
     const response = await this.#fetch(`${this.baseUrl}/api/chat`, {
       method: "POST",
@@ -916,8 +968,9 @@ export class OllamaClient {
         keep_alive: this.keepAlive,
         options: {
           num_ctx: OLLAMA_CONTEXT_SIZE,
-          temperature: OLLAMA_TOOL_PLANNER_TEMPERATURE,
-          num_predict: OLLAMA_TOOL_PLANNER_MAX_TOKENS
+          temperature:
+            options.temperature ?? OLLAMA_TOOL_PLANNER_TEMPERATURE,
+          num_predict: options.maxTokens ?? OLLAMA_TOOL_PLANNER_MAX_TOKENS
         }
       }),
       signal
