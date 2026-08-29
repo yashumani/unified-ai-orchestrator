@@ -111,7 +111,7 @@ export async function createApp(options: CreateAppOptions): Promise<Express> {
   app.use(
     cors({
       origin: loopbackCorsOrigin(options.config),
-      methods: ["GET", "POST", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "OPTIONS"],
       allowedHeaders: ["content-type", "accept"],
       credentials: false,
       maxAge: 600

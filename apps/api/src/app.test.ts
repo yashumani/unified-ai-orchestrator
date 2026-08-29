@@ -282,6 +282,41 @@ describe("local API", () => {
     expect(configured.policy.grantWorkspaceTrust).not.toHaveBeenCalled();
   });
 
+  it("allows loopback browser preflight for dashboard draft PUT requests", async () => {
+    const baseUrl = await startLocal(services());
+    const response = await fetch(`${baseUrl}/api/dashboard-builder/templates/sample/draft`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://127.0.0.1:4311",
+        "access-control-request-method": "PUT",
+        "access-control-request-headers": "content-type"
+      }
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-methods")).toContain("PUT");
+  });
+
+  it("maps oversized JSON to a safe 413 response", async () => {
+    const configured = services();
+    const baseUrl = await startLocal(configured);
+    const response = await fetch(`${baseUrl}/api/runtime/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ padding: "x".repeat(1_100_000) })
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_request",
+        message: "The JSON request exceeds the 1 MiB limit.",
+        retryable: false
+      }
+    });
+    expect(configured.runtime.start).not.toHaveBeenCalled();
+  });
+
   it("returns a stable error envelope without exposing exception details", async () => {
     const configured = services({
       runtime: {

@@ -61,6 +61,25 @@ export const errorHandler: ErrorRequestHandler = (
       .json(errorEnvelope("invalid_request", "The request failed schema validation.", false));
     return;
   }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    error.status === 413 &&
+    "type" in error &&
+    error.type === "entity.too.large"
+  ) {
+    response
+      .status(413)
+      .json(
+        errorEnvelope(
+          "invalid_request",
+          "The JSON request exceeds the 1 MiB limit.",
+          false
+        )
+      );
+    return;
+  }
   response
     .status(500)
     .json(errorEnvelope("internal_error", "The local orchestrator request failed safely.", false));
