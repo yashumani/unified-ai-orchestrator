@@ -1,3 +1,4 @@
+import { CopilotKit } from "@copilotkit/react-core/v2";
 import { useCallback, useState } from "react";
 import { OperatorWorkspace } from "./components/OperatorWorkspace";
 import { PortfolioDashboard } from "./components/PortfolioDashboard";
@@ -35,7 +36,14 @@ export function App() {
       />
 
       {workspace.activeWorkspace === "operator" ? (
-        <OperatorWorkspace />
+        <CopilotKit
+          runtimeUrl="/api/copilotkit"
+          agent="default"
+          useSingleEndpoint={false}
+          showDevConsole={false}
+        >
+          <OperatorWorkspace />
+        </CopilotKit>
       ) : workspace.activeWorkspace === "portfolio" ? (
         <main id="workspace-main" data-workspace="portfolio">
           <PortfolioDashboard />

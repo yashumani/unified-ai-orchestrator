@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { WorkspaceNavigation } from "../components/WorkspaceNavigation";
@@ -7,6 +7,10 @@ import { useWorkspaceNavigation } from "./useWorkspaceNavigation";
 
 vi.mock("../components/ChatSurface", () => ({
   ChatSurface: () => <section aria-label="Governed chat test boundary" />
+}));
+
+vi.mock("@copilotkit/react-core/v2", () => ({
+  CopilotKit: ({ children }: { children: ReactNode }) => <>{children}</>
 }));
 
 function NavigationHarness() {

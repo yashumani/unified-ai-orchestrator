@@ -421,6 +421,33 @@ describe("dashboard lifecycle service", () => {
     );
   });
 
+  it("previews a validated unsaved draft without mutating its saved revision", async () => {
+    const evidence = new MemoryEvidence();
+    const service = createService(evidence);
+    await service.initialize();
+    await service.importManifest(sampleBytes, "local-operator");
+    const edited = clone(sampleManifest);
+    edited.template.name = "Live unsaved preview";
+
+    const preview = await service.preview(previewRequest(edited));
+    const receipt = await service.getBuild(preview.buildId);
+
+    expect(preview).toMatchObject({
+      templateId: "sales-overview",
+      manifestSha256: sha256Hex(canonicalJson(edited))
+    });
+    expect(receipt).toMatchObject({
+      draftRevision: 0,
+      manifestSha256: preview.manifestSha256,
+      status: "succeeded"
+    });
+    expect(evidence.objects.has(receipt.validationObjectSha256)).toBe(true);
+    expect(service.getTemplate("sales-overview")).toMatchObject({
+      template: { currentRevision: 0 },
+      manifest: { template: { name: sampleManifest.template.name } }
+    });
+  });
+
   it("recovers projections from verified events and blocks a broken hash chain", async () => {
     const evidence = new MemoryEvidence();
     const service = createService(evidence);

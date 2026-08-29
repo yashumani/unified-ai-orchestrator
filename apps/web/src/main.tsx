@@ -1,4 +1,3 @@
-import { CopilotKit } from "@copilotkit/react-core/v2";
 import "@copilotkit/react-ui/v2/styles.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -15,13 +14,6 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <CopilotKit
-      runtimeUrl="/api/copilotkit"
-      agent="default"
-      useSingleEndpoint={false}
-      showDevConsole={false}
-    >
-      <App />
-    </CopilotKit>
+    <App />
   </StrictMode>
 );

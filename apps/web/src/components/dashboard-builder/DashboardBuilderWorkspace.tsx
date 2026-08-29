@@ -89,7 +89,7 @@ export function DashboardBuilderWorkspace({
           <button className="text-button" type="button" disabled={busy} onClick={() => void builder.downloadSample()}>
             Download sample
           </button>
-          <input ref={uploadRef} className="dashboard-file-input" type="file" tabIndex={-1} aria-hidden="true" accept="application/json,.json" onChange={upload} />
+          <input ref={uploadRef} className="dashboard-file-input" type="file" hidden accept="application/json,.json" onChange={upload} />
         </div>
       </header>
 

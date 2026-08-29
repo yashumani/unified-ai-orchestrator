@@ -411,18 +411,6 @@ export class DashboardService {
   async preview(input: DashboardPreviewRequest): Promise<DashboardPreviewResponse> {
     const request = DashboardPreviewRequestSchema.parse(input);
     const state = this.#requireTemplate(request.manifest.template.templateId);
-    if (!sameCanonical(request.manifest, state.manifest)) {
-      throw new DashboardBuilderError(
-        "revision-conflict",
-        "Save the dashboard draft before requesting a preview.",
-        {
-          details: {
-            templateId: state.manifest.template.templateId,
-            currentRevision: state.currentRevision
-          }
-        }
-      );
-    }
     const validation = validateDashboardManifest(request.manifest);
     if (!validation.valid) {
       throw new DashboardBuilderError(
@@ -430,9 +418,10 @@ export class DashboardService {
         "The dashboard preview failed manifest validation."
       );
     }
+    const validationObject = await this.#evidence.putObject(validation);
     return this.#runPreview(
       request,
-      state.validationObjectSha256,
+      validationObject.sha256,
       state.currentRevision
     );
   }
