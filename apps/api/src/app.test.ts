@@ -36,6 +36,7 @@ afterEach(async () => {
 const config: OrchestratorConfig = {
   host: "127.0.0.1",
   port: 8790,
+  releaseSha: "deb2a583234af99043fd383ca59a7be0bbde8e29",
   repositoryRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
   evidenceRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator\\.local\\evidence",
   trustGrantRelativePath: ".local/trust/workspace-grant.json",
@@ -106,6 +107,7 @@ function services(overrides: Partial<OrchestratorServices> = {}): OrchestratorSe
       invoke: vi.fn()
     },
     evidence: {
+      initialize: vi.fn(async () => undefined),
       listAgentRunReceipts: vi.fn(async () => []),
       readAgentRunReceipt: vi.fn()
     },
@@ -208,6 +210,18 @@ describe("local API", () => {
       app: "unified-ai-orchestrator",
       mode: "local",
       model: PINNED_OLLAMA_MODEL
+    });
+
+    const readiness = await fetch(`${baseUrl}/api/ready`);
+    expect(readiness.status).toBe(200);
+    expect(await readiness.json()).toEqual({
+      status: "ready",
+      app: "unified-ai-orchestrator",
+      mode: "local",
+      releaseSha: "deb2a583234af99043fd383ca59a7be0bbde8e29",
+      checks: {
+        evidence: "ready"
+      }
     });
 
     const runtime = await fetch(`${baseUrl}/api/runtime/start`, {

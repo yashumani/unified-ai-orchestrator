@@ -1,0 +1,272 @@
+name: Local Production Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy the selected main commit or roll back to the previous local release.
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - rollback
+      rollback_sha:
+        description: Exact 40-character SHA expected in the previous-release pointer (required for rollback).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unified-ai-orchestrator-local-production
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Verify and package release
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.operation == 'deploy')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # actions/setup-node@v6
+        with:
+          node-version: "22.23.2"
+          cache: npm
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Verify public boundary, types, tests, and production build
+        run: npm run verify
+
+      - name: Capture production dependency audit
+        id: npm-audit
+        shell: bash
+        run: |
+          set +e
+          npm audit --omit=dev --json > "${RUNNER_TEMP}/npm-audit.json"
+          audit_exit=$?
+          set -e
+          echo "npm-audit-exit=${audit_exit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Enforce controlled production audit gate
+        shell: bash
+        run: >-
+          node scripts/release/check-npm-audit.mjs
+          --audit "${RUNNER_TEMP}/npm-audit.json"
+          --lock package-lock.json
+          --api-package apps/api/package.json
+          --commit "${GITHUB_SHA}"
+          --output "${RUNNER_TEMP}/npm-audit-gate.json"
+
+      - name: Build deterministic release artifact
+        shell: pwsh
+        run: >-
+          ./scripts/release/New-ReleaseArtifact.ps1
+          -RepositoryRoot "${{ github.workspace }}"
+          -CommitSha "${{ github.sha }}"
+          -OutputPath "${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip"
+
+      - name: Upload immutable workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: unified-ai-orchestrator-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip
+            ${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip.sha256
+            ${{ runner.temp }}/npm-audit-gate.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  publish-release:
+    name: Publish immutable GitHub Release
+    needs: package
+    if: >-
+      needs.package.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.operation == 'deploy')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified workflow artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact@v8
+        with:
+          name: unified-ai-orchestrator-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+
+      - name: Publish release assets for the exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_DIR: ${{ runner.temp }}/release
+        run: |
+          set -euo pipefail
+          tag="local-${RELEASE_SHA}"
+          mapfile -t assets < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -print | sort)
+          test "${#assets[@]}" -eq 3
+          tag_sha="$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
+          if test -n "${tag_sha}"; then
+            test "${tag_sha}" = "${RELEASE_SHA}"
+          fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            existing_target="$(gh release view "${tag}" --json targetCommitish --jq .targetCommitish)"
+            test "${existing_target}" = "${RELEASE_SHA}"
+            test "${tag_sha}" = "${RELEASE_SHA}"
+            mapfile -t expected_names < <(for asset in "${assets[@]}"; do basename "${asset}"; done | sort)
+            mapfile -t existing_names < <(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)
+            test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${existing_names[@]}")"
+            existing_dir="${RUNNER_TEMP}/existing-release-${RELEASE_SHA}"
+            mkdir "${existing_dir}"
+            gh release download "${tag}" --dir "${existing_dir}"
+            for asset in "${assets[@]}"; do
+              cmp --silent "${asset}" "${existing_dir}/$(basename "${asset}")"
+            done
+          else
+            gh release create "${tag}" "${assets[@]}" \
+              --target "${RELEASE_SHA}" \
+              --title "Local production ${RELEASE_SHA:0:12}" \
+              --notes "Verified local-production artifact for ${RELEASE_SHA}." \
+              --latest=false
+            created_tag_sha="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq .object.sha)"
+            test "${created_tag_sha}" = "${RELEASE_SHA}"
+          fi
+
+  deploy:
+    name: Deploy exact release to local Windows production
+    needs:
+      - package
+      - publish-release
+    if: >-
+      needs.package.result == 'success' &&
+      needs.publish-release.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.operation == 'deploy')
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - unified-ai-orchestrator
+    timeout-minutes: 30
+    environment:
+      name: local-production
+    permissions:
+      contents: read
+    steps:
+      - name: Check out deployment scripts without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download verified release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact@v8
+        with:
+          name: unified-ai-orchestrator-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+
+      - name: Verify downloaded artifact checksum
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_DIR: ${{ runner.temp }}/release
+        run: |
+          $artifact = Join-Path $env:RELEASE_DIR "unified-ai-orchestrator-$env:RELEASE_SHA.zip"
+          $checksumPath = "$artifact.sha256"
+          $expected = (Get-Content -LiteralPath $checksumPath -Raw).Trim().Split(' ')[0]
+          $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -cne $actual) {
+            throw "Downloaded artifact SHA-256 mismatch."
+          }
+
+      - name: Synchronize canonical main to the qualified SHA
+        shell: pwsh
+        run: >-
+          ./scripts/release/Sync-CanonicalMain.ps1
+          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
+          -ExpectedSha "${{ github.sha }}"
+
+      - name: Deploy exact artifact and restart supervised service
+        shell: pwsh
+        run: >-
+          ./scripts/deployment/Deploy-LocalRelease.ps1
+          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
+          -ArtifactPath "${{ runner.temp }}/release/unified-ai-orchestrator-${{ github.sha }}.zip"
+          -ExpectedSha "${{ github.sha }}"
+          -HealthUri "http://127.0.0.1:8790/api/ready"
+
+      - name: Verify health, payload integrity, process receipt, and exact SHA
+        shell: pwsh
+        run: >-
+          ./scripts/deployment/Test-LocalRelease.ps1
+          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
+          -ExpectedSha "${{ github.sha }}"
+          -RequireRepositoryHeadMatch
+          -HealthUri "http://127.0.0.1:8790/api/ready"
+
+  rollback:
+    name: Roll back to confirmed previous local release
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.operation == 'rollback'
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - unified-ai-orchestrator
+    timeout-minutes: 20
+    environment:
+      name: local-production
+    permissions:
+      contents: read
+    steps:
+      - name: Check out rollback scripts without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Confirm requested rollback target
+        shell: pwsh
+        env:
+          EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
+        run: |
+          ./scripts/release/Confirm-RollbackTarget.ps1 `
+            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
+            -ExpectedPreviousSha $env:EXPECTED_ROLLBACK_SHA
+
+      - name: Roll back atomically and restart supervised service
+        shell: pwsh
+        env:
+          EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
+        run: |
+          ./scripts/deployment/Rollback-LocalRelease.ps1 `
+            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
+            -ExpectedPreviousSha $env:EXPECTED_ROLLBACK_SHA `
+            -HealthUri "http://127.0.0.1:8790/api/ready"
+
+      - name: Verify rolled-back health, payload integrity, process receipt, and SHA
+        shell: pwsh
+        env:
+          EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
+        run: |
+          ./scripts/deployment/Test-LocalRelease.ps1 `
+            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
+            -ExpectedSha $env:EXPECTED_ROLLBACK_SHA `
+            -HealthUri "http://127.0.0.1:8790/api/ready"

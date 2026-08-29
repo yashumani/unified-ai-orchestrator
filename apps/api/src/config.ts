@@ -11,12 +11,19 @@ export const CANONICAL_WHITESHADOW_WORKSPACE =
   "D:\\whiteshadow-workspace\\local-llm-ws";
 export const CANONICAL_WHITESHADOW_PYTHON =
   "D:\\whiteshadow-workspace\\local-llm-ws\\.venv\\Scripts\\python.exe";
+export const CANONICAL_DEPLOYMENT_RELEASES_ROOT = win32.resolve(
+  CANONICAL_REPOSITORY_ROOT,
+  ".local",
+  "deployment",
+  "releases"
+);
 const PINNED_OLLAMA_URL = "http://127.0.0.1:11434";
 const PINNED_WHITESHADOW_URL = "http://127.0.0.1:8787";
 
 export interface OrchestratorConfig {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  releaseSha?: string;
   repositoryRoot: string;
   evidenceRoot: string;
   trustGrantRelativePath: string;
@@ -26,6 +33,15 @@ export interface OrchestratorConfig {
   whiteshadowWorkspace: string;
   whiteshadowPython: string;
   webDistRoot: string;
+}
+
+function parseReleaseSha(value: string): string {
+  if (value === "development" || /^[0-9a-f]{40}$/u.test(value)) {
+    return value;
+  }
+  throw new Error(
+    "ORCHESTRATOR_RELEASE_SHA must be development or a lowercase 40-character Git SHA."
+  );
 }
 
 function optionalString(
@@ -74,6 +90,59 @@ function exactPath(value: string, expected: string, key: string): string {
     throw new Error(`${key} is pinned to the Phase 1 canonical path.`);
   }
   return win32.resolve(expected);
+}
+
+function deploymentWebDistPath(value: string): string {
+  const absolute = absolutePath(value, "ORCHESTRATOR_WEB_DIST_ROOT");
+  const developmentWebDist = win32.resolve(
+    CANONICAL_REPOSITORY_ROOT,
+    "apps",
+    "web",
+    "dist"
+  );
+  if (pathKey(absolute) === pathKey(developmentWebDist)) {
+    return developmentWebDist;
+  }
+  const relativePath = win32
+    .relative(CANONICAL_DEPLOYMENT_RELEASES_ROOT, absolute)
+    .replaceAll("\\", "/");
+  const segments = relativePath.split("/");
+  if (
+    segments.length !== 4 ||
+    !/^[0-9a-f]{40}$/u.test(segments[0] ?? "") ||
+    segments[1] !== "apps" ||
+    segments[2] !== "web" ||
+    segments[3] !== "dist"
+  ) {
+    throw new Error(
+      "ORCHESTRATOR_WEB_DIST_ROOT must be the canonical development bundle or an exact deployment release bundle."
+    );
+  }
+  return win32.resolve(CANONICAL_DEPLOYMENT_RELEASES_ROOT, ...segments);
+}
+
+function assertReleaseWebDistPair(releaseSha: string, webDistRoot: string): void {
+  const developmentWebDist = win32.resolve(
+    CANONICAL_REPOSITORY_ROOT,
+    "apps",
+    "web",
+    "dist"
+  );
+  const expectedWebDist =
+    releaseSha === "development"
+      ? developmentWebDist
+      : win32.resolve(
+          CANONICAL_DEPLOYMENT_RELEASES_ROOT,
+          releaseSha,
+          "apps",
+          "web",
+          "dist"
+        );
+  if (pathKey(webDistRoot) !== pathKey(expectedWebDist)) {
+    throw new Error(
+      "ORCHESTRATOR_RELEASE_SHA and ORCHESTRATOR_WEB_DIST_ROOT must identify the same release."
+    );
+  }
 }
 
 function loopbackHttpUrl(value: string, key: string): string {
@@ -166,9 +235,21 @@ export function readConfig(
     "WHITESHADOW_WORKSPACE"
   );
 
+  const releaseSha = parseReleaseSha(
+    optionalString(environment, "ORCHESTRATOR_RELEASE_SHA", "development")
+  );
+  const webDistRoot = deploymentWebDistPath(
+    optionalString(
+      environment,
+      "ORCHESTRATOR_WEB_DIST_ROOT",
+      win32.resolve(CANONICAL_REPOSITORY_ROOT, "apps", "web", "dist")
+    )
+  );
+  assertReleaseWebDistPair(releaseSha, webDistRoot);
   return {
     host: parseHost(optionalString(environment, "ORCHESTRATOR_HOST", "127.0.0.1")),
     port: parsePort(optionalString(environment, "ORCHESTRATOR_PORT", "8790")),
+    releaseSha,
     repositoryRoot,
     evidenceRoot,
     trustGrantRelativePath: `${trustRoot}/workspace-grant.json`,
@@ -213,12 +294,7 @@ export function readConfig(
       CANONICAL_WHITESHADOW_PYTHON,
       "WHITESHADOW_PYTHON"
     ),
-    webDistRoot: win32.resolve(
-      CANONICAL_REPOSITORY_ROOT,
-      "apps",
-      "web",
-      "dist"
-    )
+    webDistRoot
   };
 }
 
@@ -243,11 +319,8 @@ export function assertCanonicalConfigPaths(config: OrchestratorConfig): void {
     CANONICAL_WHITESHADOW_PYTHON,
     "whiteshadowPython"
   );
-  exactPath(
-    config.webDistRoot,
-    win32.resolve(CANONICAL_REPOSITORY_ROOT, "apps", "web", "dist"),
-    "webDistRoot"
-  );
+  const webDistRoot = deploymentWebDistPath(config.webDistRoot);
+  assertReleaseWebDistPair(config.releaseSha ?? "development", webDistRoot);
   if (
     config.ollamaBaseUrl !== PINNED_OLLAMA_URL ||
     config.whiteshadowBaseUrl !== PINNED_WHITESHADOW_URL
@@ -277,6 +350,30 @@ export async function validateCanonicalRuntimePaths(
       (expectedType === "directory" && !status.isDirectory())
     ) {
       throw new Error(`${path} is not the required ${expectedType}.`);
+    }
+  }
+  const developmentWebDist = win32.resolve(
+    CANONICAL_REPOSITORY_ROOT,
+    "apps",
+    "web",
+    "dist"
+  );
+  if (pathKey(config.webDistRoot) !== pathKey(developmentWebDist)) {
+    const relativePath = win32.relative(CANONICAL_REPOSITORY_ROOT, config.webDistRoot);
+    let current = CANONICAL_REPOSITORY_ROOT;
+    for (const segment of relativePath.split(/[\\/]/u)) {
+      current = win32.resolve(current, segment);
+      const status = await lstat(current);
+      if (status.isSymbolicLink()) {
+        throw new Error("deployment web bundle cannot traverse a symbolic link or junction");
+      }
+    }
+    const canonical = await realpath(config.webDistRoot);
+    if (pathKey(canonical) !== pathKey(config.webDistRoot)) {
+      throw new Error("deployment web bundle resolved outside its exact release path");
+    }
+    if (!(await lstat(canonical)).isDirectory()) {
+      throw new Error("deployment web bundle must be a directory");
     }
   }
 }

@@ -1,6 +1,7 @@
 import { PINNED_OLLAMA_MODEL } from "@unified-ai/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  CANONICAL_DEPLOYMENT_RELEASES_ROOT,
   CANONICAL_OLLAMA_EXECUTABLE,
   CANONICAL_WHITESHADOW_WORKSPACE,
   readConfig
@@ -22,6 +23,7 @@ describe("readConfig", () => {
     expect(config).toMatchObject({
       host: "127.0.0.1",
       port: 8790,
+      releaseSha: "development",
       repositoryRoot,
       ollamaBaseUrl: "http://127.0.0.1:11434",
       whiteshadowBaseUrl: "http://127.0.0.1:8787"
@@ -30,6 +32,101 @@ describe("readConfig", () => {
       "D:\\whiteshadow-workspace\\local-llm-ws\\.venv\\Scripts\\python.exe"
     );
     expect(PINNED_OLLAMA_MODEL).toBe("qwen3:4b");
+  });
+
+  it("accepts only a development marker or an exact lowercase release SHA", () => {
+    const releaseSha = "deb2a583234af99043fd383ca59a7be0bbde8e29";
+    const webDistRoot = `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${releaseSha}\\apps\\web\\dist`;
+    expect(
+      readConfig(
+        {
+          ORCHESTRATOR_RELEASE_SHA: releaseSha,
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          ORCHESTRATOR_WEB_DIST_ROOT: webDistRoot,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      ).releaseSha
+    ).toBe(releaseSha);
+
+    expect(() =>
+      readConfig(
+        {
+          ORCHESTRATOR_RELEASE_SHA: "latest",
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      )
+    ).toThrow(/RELEASE_SHA/u);
+  });
+
+  it("accepts only an exact versioned deployment web bundle", () => {
+    const releaseSha = "deb2a583234af99043fd383ca59a7be0bbde8e29";
+    const webDistRoot = `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${releaseSha}\\apps\\web\\dist`;
+    expect(
+      readConfig(
+        {
+          ORCHESTRATOR_RELEASE_SHA: releaseSha,
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          ORCHESTRATOR_WEB_DIST_ROOT: webDistRoot,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      ).webDistRoot
+    ).toBe(webDistRoot);
+
+    for (const invalid of [
+      "D:\\outside\\apps\\web\\dist",
+      `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\latest\\apps\\web\\dist`,
+      `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${releaseSha}\\apps\\api\\dist`
+    ]) {
+      expect(() =>
+        readConfig(
+          {
+            ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+            ORCHESTRATOR_WEB_DIST_ROOT: invalid,
+            OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+            WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+          },
+          repositoryRoot
+        )
+      ).toThrow(/WEB_DIST_ROOT/u);
+    }
+  });
+
+  it("requires the readiness SHA and release web bundle SHA to match", () => {
+    const firstSha = "a".repeat(40);
+    const secondSha = "b".repeat(40);
+    const releaseWebDist = `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${secondSha}\\apps\\web\\dist`;
+
+    expect(() =>
+      readConfig(
+        {
+          ORCHESTRATOR_RELEASE_SHA: firstSha,
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          ORCHESTRATOR_WEB_DIST_ROOT: releaseWebDist,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      )
+    ).toThrow(/same release/u);
+
+    expect(() =>
+      readConfig(
+        {
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          ORCHESTRATOR_WEB_DIST_ROOT: releaseWebDist,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      )
+    ).toThrow(/same release/u);
   });
 
   it("rejects non-loopback binding", () => {

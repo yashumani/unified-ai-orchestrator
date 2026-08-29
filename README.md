@@ -2,7 +2,7 @@
 
 Unified AI Orchestrator is a loopback-only local application for governed AI work inside this repository. Phase 1 combines a pinned Ollama model (`qwen3:4b`), a CopilotKit chat console, guarded repository tools, persistent repository-scoped trust, read-only WhiteShadow capability discovery, and immutable run receipts. Phase 2 adds a GET/HEAD-only GitHub portfolio audit, deterministic overlap analysis, cited local-model recommendations, ChatGPT intent-evidence import, and a rationalization dashboard.
 
-The approved architectures and delivery gates are in the [Phase 1 design](docs/superpowers/specs/2026-08-28-ollama-orchestration-phase-1-design.md), [Phase 1 implementation plan](docs/plans/2026-08-28-ollama-orchestration-phase-1-implementation-plan.md), [Phase 2 design](docs/superpowers/specs/2026-08-28-portfolio-rationalization-phase-2-design.md), and [Phase 2 implementation plan](docs/plans/2026-08-28-portfolio-rationalization-phase-2-implementation-plan.md).
+The approved architectures and delivery gates are in the [Phase 1 design](docs/superpowers/specs/2026-08-28-ollama-orchestration-phase-1-design.md), [Phase 1 implementation plan](docs/plans/2026-08-28-ollama-orchestration-phase-1-implementation-plan.md), [Phase 2 design](docs/superpowers/specs/2026-08-28-portfolio-rationalization-phase-2-design.md), and [Phase 2 implementation plan](docs/plans/2026-08-28-portfolio-rationalization-phase-2-implementation-plan.md). The complete system and dashboard lifecycle are illustrated in the [interactive architecture diagram](docs/architecture/unified-ai-orchestrator-framework.html).
 
 ## Safety boundary
 
@@ -107,3 +107,9 @@ npm run verify
 ```
 
 The synthetic ingestion fixture writes only to ignored `.local/evidence` storage.
+
+## Local production delivery
+
+GitHub Actions is the release control plane for this single-machine deployment. A verified `main` commit is packaged as a hash-addressed GitHub Release, then a repository-scoped self-hosted Windows runner installs and supervises that exact release under ignored `.local/deployment` storage on the D drive. The application remains available only at `http://127.0.0.1:8790`; GitHub Pages and public ingress are not part of the architecture.
+
+See the [local production deployment runbook](docs/operations/local-production-deployment.md) for runner preparation, release verification, monitoring, and exact-SHA rollback.

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unified AI Orchestrator Framework</title>
+  <link rel="icon" href="data:,">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; padding: 2rem; background: #020617; color: #fff; font-family: "JetBrains Mono", monospace; }
+    .container { max-width: 1320px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: .5rem; }
+    .pulse-dot { width: 12px; height: 12px; border-radius: 50%; background: #22d3ee; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+    h1 { font-size: 1.5rem; letter-spacing: -.025em; }
+    h2 { margin: 0 0 1rem .25rem; font-size: 1rem; color: #e2e8f0; }
+    .subtitle { margin-left: 1.75rem; color: #94a3b8; font-size: .875rem; line-height: 1.6; }
+    .diagram-section { margin-top: 1.5rem; }
+    .diagram-container { overflow-x: auto; padding: 1.5rem; border: 1px solid #1e293b; border-radius: 1rem; background: rgba(15,23,42,.5); }
+    svg { display: block; width: 100%; min-width: 1000px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { padding: 1.25rem; border: 1px solid #1e293b; border-radius: .75rem; background: rgba(15,23,42,.5); }
+    .card-header { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .cyan { background: #22d3ee; } .emerald { background: #34d399; } .violet { background: #a78bfa; } .amber { background: #fbbf24; } .rose { background: #fb7185; }
+    .card h3 { font-size: .875rem; }
+    .card ul { list-style: none; color: #94a3b8; font-size: .75rem; line-height: 1.65; }
+    .footer { margin-top: 1.5rem; text-align: center; color: #475569; font-size: .75rem; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <div class="header-row"><div class="pulse-dot"></div><h1>Unified AI Orchestrator Framework</h1></div>
+      <p class="subtitle">GitHub-governed delivery, versioned D-drive releases, loopback-only React/API runtime, local Ollama intelligence, and evidence-backed dashboard lifecycle.</p>
+    </header>
+
+    <section class="diagram-section">
+      <h2>1. Release control plane and local application architecture</h2>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1200 820" role="img" aria-labelledby="architecture-title architecture-description">
+          <title id="architecture-title">Unified AI Orchestrator architecture</title>
+          <desc id="architecture-description">GitHub verifies and packages exact commits. A self-hosted Windows runner installs a versioned release on the D drive and starts the loopback-only React and API application, which uses local evidence, Ollama, WhiteShadow discovery, and a separately gated Qlik adapter.</desc>
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+            <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#22d3ee"/></marker>
+            <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#fb7185"/></marker>
+            <pattern id="grid-a" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0L0 0 0 40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#grid-a)"/>
+
+          <!-- Connections are intentionally behind component boxes. -->
+          <line x1="155" y1="168" x2="155" y2="218" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="155" y1="298" x2="155" y2="348" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="155" y1="428" x2="155" y2="478" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M265 518 H330 Q350 518 350 498 V190 Q350 170 370 170 H410" fill="none" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow)"/>
+          <line x1="525" y1="210" x2="525" y2="290" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="525" y1="370" x2="525" y2="450" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M640 490 H680" fill="none" stroke="#34d399" stroke-width="1.7" marker-end="url(#arrow)"/>
+          <line x1="790" y1="220" x2="790" y2="278" stroke="#22d3ee" stroke-width="1.7" marker-end="url(#arrow-cyan)"/>
+          <line x1="790" y1="358" x2="790" y2="418" stroke="#34d399" stroke-width="1.7" marker-end="url(#arrow)"/>
+          <path d="M905 458 H945" fill="none" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow)"/>
+          <path d="M845 518 V575 H730" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M845 518 V575 H960" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M845 518 V675 H730" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M845 518 V675 H960" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-rose)"/>
+          <path d="M1088 318 H1140 Q1160 318 1160 298 V235 Q1160 215 1140 215 H910" fill="none" stroke="#22d3ee" stroke-width="1.7" marker-end="url(#arrow-cyan)"/>
+
+          <!-- Boundaries -->
+          <rect x="20" y="35" width="290" height="600" rx="12" fill="rgba(120,53,15,.08)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+          <text x="34" y="55" fill="#fbbf24" font-size="10" font-weight="600">GITHUB CONTROL PLANE</text>
+          <rect x="340" y="35" width="840" height="680" rx="12" fill="rgba(30,41,59,.16)" stroke="#94a3b8" stroke-width="1" stroke-dasharray="8,4"/>
+          <text x="354" y="55" fill="#94a3b8" font-size="10" font-weight="600">WINDOWS HOST · D:\Yashu-AI-Workspace · LOOPBACK ONLY</text>
+          <rect x="375" y="85" width="300" height="530" rx="10" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+          <text x="389" y="104" fill="#fb7185" font-size="8">RELEASE / PROCESS CONTROL BOUNDARY</text>
+          <rect x="700" y="85" width="440" height="590" rx="10" fill="transparent" stroke="#22d3ee" stroke-width="1" stroke-dasharray="4,4"/>
+          <text x="714" y="104" fill="#22d3ee" font-size="8">APPLICATION BOUNDARY · 127.0.0.1:8790</text>
+
+          <!-- GitHub components -->
+          <rect x="45" y="88" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="88" width="220" height="80" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="155" y="116" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">GitHub Repository</text><text x="155" y="137" fill="#94a3b8" font-size="9" text-anchor="middle">PR · main · exact commit SHA</text><text x="155" y="151" fill="#fbbf24" font-size="8" text-anchor="middle">public source of truth</text>
+          <rect x="45" y="218" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="218" width="220" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="155" y="246" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Fixture CI</text><text x="155" y="267" fill="#94a3b8" font-size="9" text-anchor="middle">boundary · types · tests · build</text><text x="155" y="282" fill="#34d399" font-size="8" text-anchor="middle">must pass</text>
+          <rect x="45" y="348" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="348" width="220" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="155" y="376" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Release Workflow</text><text x="155" y="397" fill="#94a3b8" font-size="9" text-anchor="middle">verify · audit gate · package</text><text x="155" y="412" fill="#34d399" font-size="8" text-anchor="middle">main only</text>
+          <rect x="45" y="478" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="478" width="220" height="80" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="155" y="506" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Immutable Release</text><text x="155" y="527" fill="#94a3b8" font-size="9" text-anchor="middle">ZIP · manifest · SHA-256</text><text x="155" y="542" fill="#fbbf24" font-size="8" text-anchor="middle">tagged to exact commit</text>
+
+          <!-- Host release control -->
+          <rect x="410" y="130" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="130" width="230" height="80" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="525" y="158" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Self-hosted Runner</text><text x="525" y="179" fill="#94a3b8" font-size="9" text-anchor="middle">Windows · repository label</text><text x="525" y="194" fill="#fb7185" font-size="8" text-anchor="middle">local-production environment</text>
+          <rect x="410" y="290" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="290" width="230" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="525" y="318" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Deployment Engine</text><text x="525" y="339" fill="#94a3b8" font-size="9" text-anchor="middle">verify · extract · install · probe</text><text x="525" y="354" fill="#34d399" font-size="8" text-anchor="middle">fail closed + automatic restore</text>
+          <rect x="410" y="450" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="450" width="230" height="80" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="525" y="478" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Versioned Release Store</text><text x="525" y="499" fill="#94a3b8" font-size="9" text-anchor="middle">releases/&lt;40-char SHA&gt;</text><text x="525" y="514" fill="#a78bfa" font-size="8" text-anchor="middle">current + previous pointers</text>
+          <rect x="410" y="555" width="230" height="38" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c" stroke-width="1"/>
+          <text x="525" y="579" fill="#fb923c" font-size="9" text-anchor="middle">Persistent supervised process</text>
+
+          <!-- Application -->
+          <rect x="730" y="140" width="120" height="80" rx="6" fill="#0f172a"/><rect x="730" y="140" width="120" height="80" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="790" y="168" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">React UI</text><text x="790" y="189" fill="#94a3b8" font-size="9" text-anchor="middle">workspaces</text><text x="790" y="204" fill="#22d3ee" font-size="8" text-anchor="middle">same-origin bundle</text>
+          <rect x="730" y="278" width="120" height="80" rx="6" fill="#0f172a"/><rect x="730" y="278" width="120" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="790" y="306" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Express API</text><text x="790" y="327" fill="#94a3b8" font-size="9" text-anchor="middle">health · readiness</text><text x="790" y="342" fill="#34d399" font-size="8" text-anchor="middle">exact release SHA</text>
+          <rect x="730" y="418" width="175" height="100" rx="6" fill="#0f172a"/><rect x="730" y="418" width="175" height="100" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="817" y="446" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Governed Services</text><text x="817" y="467" fill="#94a3b8" font-size="8" text-anchor="middle">CopilotKit + allowlisted tools</text><text x="817" y="483" fill="#94a3b8" font-size="8" text-anchor="middle">portfolio + dashboard builder</text><text x="817" y="500" fill="#34d399" font-size="8" text-anchor="middle">bounded, receipt-backed actions</text>
+          <rect x="945" y="418" width="165" height="100" rx="6" fill="#0f172a"/><rect x="945" y="418" width="165" height="100" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="1027" y="446" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Local Evidence</text><text x="1027" y="467" fill="#94a3b8" font-size="8" text-anchor="middle">immutable objects + receipts</text><text x="1027" y="483" fill="#94a3b8" font-size="8" text-anchor="middle">dashboard revisions + events</text><text x="1027" y="500" fill="#a78bfa" font-size="8" text-anchor="middle">ignored .local storage</text>
+          <rect x="700" y="575" width="145" height="70" rx="6" fill="#0f172a"/><rect x="700" y="575" width="145" height="70" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="772" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Ollama</text><text x="772" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">qwen3:4b · local LLM</text>
+          <rect x="960" y="575" width="145" height="70" rx="6" fill="#0f172a"/><rect x="960" y="575" width="145" height="70" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="1032" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">WhiteShadow</text><text x="1032" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">read-only capabilities</text>
+          <rect x="960" y="665" width="145" height="38" rx="6" fill="#0f172a"/><rect x="960" y="665" width="145" height="38" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="1032" y="688" fill="#fb7185" font-size="9" text-anchor="middle">Qlik adapter · gated off</text>
+          <rect x="1040" y="175" width="100" height="80" rx="6" fill="#0f172a"/><rect x="1040" y="175" width="100" height="80" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="1090" y="203" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">User</text><text x="1090" y="224" fill="#94a3b8" font-size="8" text-anchor="middle">local browser</text><text x="1090" y="239" fill="#22d3ee" font-size="8" text-anchor="middle">127.0.0.1 only</text>
+
+          <!-- Legend outside every boundary. -->
+          <text x="35" y="752" fill="#fff" font-size="10" font-weight="600">LEGEND</text>
+          <rect x="100" y="742" width="16" height="10" rx="2" fill="rgba(8,51,68,.4)" stroke="#22d3ee"/><text x="123" y="751" fill="#94a3b8" font-size="8">Frontend</text>
+          <rect x="210" y="742" width="16" height="10" rx="2" fill="rgba(6,78,59,.4)" stroke="#34d399"/><text x="233" y="751" fill="#94a3b8" font-size="8">Backend / verified action</text>
+          <rect x="405" y="742" width="16" height="10" rx="2" fill="rgba(76,29,149,.4)" stroke="#a78bfa"/><text x="428" y="751" fill="#94a3b8" font-size="8">Persistent data</text>
+          <rect x="535" y="742" width="16" height="10" rx="2" fill="rgba(120,53,15,.3)" stroke="#fbbf24"/><text x="558" y="751" fill="#94a3b8" font-size="8">GitHub control</text>
+          <rect x="680" y="742" width="16" height="10" rx="2" fill="rgba(136,19,55,.4)" stroke="#fb7185"/><text x="703" y="751" fill="#94a3b8" font-size="8">Security / gated boundary</text>
+          <line x1="875" y1="748" x2="900" y2="748" stroke="#fb7185" stroke-dasharray="4,4"/><text x="910" y="751" fill="#94a3b8" font-size="8">disabled until separately approved</text>
+        </svg>
+      </div>
+    </section>
+
+    <section class="diagram-section">
+      <h2>2. Declarative dashboard create, update, publish, and rollback flow</h2>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1200 520" role="img" aria-labelledby="flow-title flow-description">
+          <title id="flow-title">Dashboard manifest lifecycle</title>
+          <desc id="flow-description">A user downloads the owned sample, edits declarative JSON, uploads it, receives strict validation and immediate safe preview, then saves or publishes immutable revisions with deterministic update and rollback behavior. Executable uploads are rejected.</desc>
+          <defs>
+            <marker id="flow-arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+            <marker id="flow-reject" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#fb7185"/></marker>
+            <pattern id="grid-b" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0L0 0 0 40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#grid-b)"/>
+          <line x1="160" y1="165" x2="200" y2="165" stroke="#64748b" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <line x1="350" y1="165" x2="390" y2="165" stroke="#64748b" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <line x1="540" y1="165" x2="580" y2="165" stroke="#34d399" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <line x1="730" y1="165" x2="770" y2="165" stroke="#64748b" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <line x1="920" y1="165" x2="960" y2="165" stroke="#64748b" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <path d="M655 205 V270" fill="none" stroke="#fb7185" stroke-width="1.5" marker-end="url(#flow-reject)"/>
+          <path d="M1035 205 V360 H845 V380" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <path d="M930 412 H1035 Q1060 412 1060 387 V207" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#flow-arrow)"/>
+          <path d="M845 380 V465 H465 V207" fill="none" stroke="#22d3ee" stroke-width="1.3" stroke-dasharray="5,5" marker-end="url(#flow-arrow)"/>
+
+          <rect x="30" y="125" width="130" height="80" rx="6" fill="#0f172a"/><rect x="30" y="125" width="130" height="80" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/><text x="95" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Download</text><text x="95" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">owned sample</text><text x="95" y="189" fill="#22d3ee" font-size="8" text-anchor="middle">dashboard-template/v1</text>
+          <rect x="200" y="125" width="150" height="80" rx="6" fill="#0f172a"/><rect x="200" y="125" width="150" height="80" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/><text x="275" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Edit Manifest</text><text x="275" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">bindings · measures · layout</text><text x="275" y="189" fill="#94a3b8" font-size="8" text-anchor="middle">theme · interactions</text>
+          <rect x="390" y="125" width="150" height="80" rx="6" fill="#0f172a"/><rect x="390" y="125" width="150" height="80" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/><text x="465" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Upload / Author</text><text x="465" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">JSON or form editor</text><text x="465" y="189" fill="#22d3ee" font-size="8" text-anchor="middle">max 1 MiB</text>
+          <rect x="580" y="125" width="150" height="80" rx="6" fill="#0f172a"/><rect x="580" y="125" width="150" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/><text x="655" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Strict Validation</text><text x="655" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">schema + semantics</text><text x="655" y="189" fill="#34d399" font-size="8" text-anchor="middle">allowlisted registry only</text>
+          <rect x="770" y="125" width="150" height="80" rx="6" fill="#0f172a"/><rect x="770" y="125" width="150" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/><text x="845" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Live Preview</text><text x="845" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">fixture adapter</text><text x="845" y="189" fill="#34d399" font-size="8" text-anchor="middle">validated unsaved buffer</text>
+          <rect x="960" y="125" width="150" height="80" rx="6" fill="#0f172a"/><rect x="960" y="125" width="150" height="80" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/><text x="1035" y="153" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Save / Publish</text><text x="1035" y="174" fill="#94a3b8" font-size="8" text-anchor="middle">expectedRevision</text><text x="1035" y="189" fill="#a78bfa" font-size="8" text-anchor="middle">atomic + immutable receipt</text>
+          <rect x="540" y="270" width="230" height="70" rx="6" fill="#0f172a"/><rect x="540" y="270" width="230" height="70" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/><text x="655" y="294" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">Reject Atomically</text><text x="655" y="314" fill="#fb7185" font-size="8" text-anchor="middle">JS · JSX · HTML · packages</text><text x="655" y="328" fill="#fb7185" font-size="8" text-anchor="middle">unknown component or operation types</text>
+          <rect x="760" y="380" width="170" height="65" rx="6" fill="#0f172a"/><rect x="760" y="380" width="170" height="65" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/><text x="845" y="406" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">Revision History</text><text x="845" y="426" fill="#94a3b8" font-size="8" text-anchor="middle">download · replay · rollback</text>
+          <text x="670" y="248" fill="#fb7185" font-size="8">errors block storage and preview</text>
+          <text x="875" y="349" fill="#a78bfa" font-size="8">rollback publishes a new event</text>
+          <text x="650" y="486" fill="#22d3ee" font-size="8" text-anchor="middle">deterministic create or update by stable template ID + expected revision</text>
+        </svg>
+      </div>
+    </section>
+
+    <section class="cards">
+      <article class="card"><div class="card-header"><div class="card-dot rose"></div><h3>Safety boundary</h3></div><ul><li>- Loopback Host and CORS enforcement</li><li>- No uploaded executable code or packages</li><li>- Protected repository paths and branch policy</li><li>- Credentials never enter manifests or receipts</li></ul></article>
+      <article class="card"><div class="card-header"><div class="card-dot emerald"></div><h3>Release proof</h3></div><ul><li>- Exact main commit passes the full verifier</li><li>- Controlled production dependency audit</li><li>- Manifest and SHA-256 verified before install</li><li>- Readiness reports the deployed commit SHA</li></ul></article>
+      <article class="card"><div class="card-header"><div class="card-dot violet"></div><h3>Recovery model</h3></div><ul><li>- One directory per immutable release</li><li>- Atomic current and previous pointers</li><li>- Failed readiness restores prior release</li><li>- Manual rollback requires the exact prior SHA</li></ul></article>
+    </section>
+    <p class="footer">Unified AI Orchestrator · GitHub delivery + local-first AI + governed dashboard framework · 2026-08-29</p>
+  </main>
+</body>
+</html>

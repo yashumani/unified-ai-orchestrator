@@ -60,6 +60,22 @@ export function createApiRouter(services: OrchestratorServices): Router {
   });
 
   router.get(
+    "/ready",
+    asyncRoute(async (_request, response) => {
+      await services.evidence.initialize();
+      response.json({
+        status: "ready",
+        app: "unified-ai-orchestrator",
+        mode: "local",
+        releaseSha: services.config.releaseSha ?? "development",
+        checks: {
+          evidence: "ready"
+        }
+      });
+    })
+  );
+
+  router.get(
     "/runtime/status",
     asyncRoute(async (_request, response) => {
       response.json(await services.runtime.status());
