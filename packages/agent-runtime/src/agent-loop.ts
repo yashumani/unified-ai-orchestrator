@@ -139,7 +139,7 @@ function policyDecision(result: ToolResult, checkedAt: string): PolicyDecision {
   return PolicyDecisionSchema.parse({
     allowed: true,
     code: "allowed",
-    reason: "The fixed catalog classifies this as a read-only repository tool.",
+    reason: "The fixed local catalog classifies this as a read-only tool.",
     checkedAt
   });
 }

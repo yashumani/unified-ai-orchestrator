@@ -14,6 +14,12 @@
     },
     {
       "path": "../../packages/ollama-client"
+    },
+    {
+      "path": "../evidence-index"
+    },
+    {
+      "path": "../portfolio-ingestion"
     }
   ]
 }

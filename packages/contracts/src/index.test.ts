@@ -19,6 +19,7 @@ import {
   RepositoryCitationSchema,
   RepositoryProfileSchema,
   RepositorySnapshotSchema,
+  RepositoryToolNameSchema,
   SCHEMA_VERSION,
   SourceReferenceSchema
 } from "./index.js";
@@ -348,6 +349,21 @@ describe("portfolio rationalization contracts", () => {
         weightedConfidence: 0.5
       })
     ).toThrow(/weightedConfidence/u);
+  });
+
+  it("pins only read-only portfolio model tool names", () => {
+    for (const name of [
+      "portfolio.list_repositories",
+      "portfolio.get_repository",
+      "portfolio.list_clusters",
+      "portfolio.explain_overlap",
+      "portfolio.list_recommendations",
+      "portfolio.resolve_citation"
+    ]) {
+      expect(RepositoryToolNameSchema.parse(name)).toBe(name);
+    }
+    expect(() => RepositoryToolNameSchema.parse("portfolio.refresh")).toThrow();
+    expect(() => RepositoryToolNameSchema.parse("portfolio.override")).toThrow();
   });
 
   it("binds overlap clusters and recommendations to repository evidence", () => {

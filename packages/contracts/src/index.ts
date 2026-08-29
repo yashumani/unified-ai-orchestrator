@@ -753,7 +753,13 @@ export const RepositoryToolNameSchema = z.enum([
   "repository.write_file",
   "repository.replace_text",
   "repository.create_directory",
-  "repository.run_npm_script"
+  "repository.run_npm_script",
+  "portfolio.list_repositories",
+  "portfolio.get_repository",
+  "portfolio.list_clusters",
+  "portfolio.explain_overlap",
+  "portfolio.list_recommendations",
+  "portfolio.resolve_citation"
 ]);
 
 export const RequestedToolNameSchema = z
