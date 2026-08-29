@@ -1,5 +1,6 @@
 import { CapabilityPanel } from "./components/CapabilityPanel";
 import { ChatSurface } from "./components/ChatSurface";
+import { PortfolioDashboard } from "./components/PortfolioDashboard";
 import { RepositoryStatus } from "./components/RepositoryStatus";
 import { RunReceipts } from "./components/RunReceipts";
 import { RuntimeStatus } from "./components/RuntimeStatus";
@@ -78,6 +79,8 @@ export function App() {
           trust={operator.trust.data}
           loading={operator.runtime.loading && operator.runtime.data === null}
         />
+
+        <PortfolioDashboard />
 
         <div className="control-grid">
           <aside className="control-column control-column--left" aria-label="Runtime and capability controls">
