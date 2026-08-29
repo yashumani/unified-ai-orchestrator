@@ -23,7 +23,7 @@ const PROHIBITED_KEYS = new Set([
   "typescript",
   "wasm"
 ]);
-const PROHIBITED_VALUE = /(?:<\/?[A-Za-z][^>]*>|(?:javascript|data):|^UEsDB)/iu;
+const PROHIBITED_VALUE = /(?:<\/?[A-Za-z][^>]*>|^\s*javascript:\s*\S|^\s*data:[^,\s]{0,256},|^\s*UEsDB)/iu;
 const PUBLISH_BLOCKING_WARNINGS = new Set([
   "external-license-review-required",
   "layout-overlap",
@@ -457,6 +457,9 @@ function semanticDiagnostics(manifest: DashboardManifest): DashboardDiagnostic[]
     }
   });
 
+  const componentTypes = new Map(
+    manifest.components.map((component) => [component.componentId, component.type])
+  );
   manifest.interactions.forEach((interaction, index) => {
     const base = `/interactions/${String(index)}`;
     if (!componentIds.has(interaction.sourceComponentId)) {
@@ -485,6 +488,27 @@ function semanticDiagnostics(manifest: DashboardManifest): DashboardDiagnostic[]
           path: `${base}/targetBindingId`
         })
       );
+    }
+    const sourceType = componentTypes.get(interaction.sourceComponentId);
+    const sourceCompatible =
+      sourceType === undefined ||
+      interaction.type === "clear-filter" ||
+      interaction.type === "navigate-section" ||
+      ((interaction.type === "set-filter" ||
+        interaction.type === "select-chart-value") &&
+        (sourceType === "bar-chart" || sourceType === "line-chart")) ||
+      (interaction.type === "select-row" && sourceType === "data-table");
+    if (!sourceCompatible) {
+      diagnostics.push({
+        severity: "error",
+        code: "interaction-source-incompatible",
+        path: `${base}/sourceComponentId`,
+        message: `Component ${interaction.sourceComponentId} cannot originate a ${interaction.type} interaction.`,
+        remediation:
+          interaction.type === "select-row"
+            ? "Choose a data-table source component."
+            : "Choose a bar-chart or line-chart source component."
+      });
     }
   });
 

@@ -148,6 +148,47 @@ describe("dashboard manifest semantic validation", () => {
     );
   });
 
+  it("does not confuse ordinary prose with a data URL", async () => {
+    const manifest = await sample();
+    const result = validateDashboardManifest({
+      ...manifest,
+      template: {
+        ...manifest.template,
+        description: "Data: monthly sales from the tracked synthetic fixture."
+      }
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.normalizedManifest?.template.description).toBe(
+      "Data: monthly sales from the tracked synthetic fixture."
+    );
+  });
+
+  it("rejects interaction sources that cannot produce the declared selection", async () => {
+    const manifest = await sample();
+    const result = validateDashboardManifest({
+      ...manifest,
+      interactions: [
+        {
+          interactionId: "invalid-row-source",
+          type: "select-row",
+          sourceComponentId: "sales-kpi",
+          targetComponentId: "sales-table"
+        }
+      ]
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "interaction-source-incompatible",
+          path: "/interactions/0/sourceComponentId"
+        })
+      ])
+    );
+  });
+
   it("requires the separately gated Qlik adapter for Qlik calculations", async () => {
     const manifest = await sample();
     const result = validateDashboardManifest({
