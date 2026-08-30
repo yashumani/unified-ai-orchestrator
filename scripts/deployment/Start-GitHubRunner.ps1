@@ -14,10 +14,10 @@ $installation = Read-GitHubRunnerInstallation -Layout $layout
 if (-not [bool]$installation.configured) {
   throw "GitHub runner is not configured."
 }
-[void](Assert-GitHubRunnerTaskRegistration `
-    -RepositoryRoot $RepositoryRoot `
-    -Layout $layout `
-    -Installation $installation)
+# The installer validates the exact scheduled-task definition before it starts
+# this launcher. Querying Task Scheduler again from inside that running task can
+# block indefinitely on Windows, so startup validates the durable installation
+# receipt and pinned runner payload without recursively inspecting its own task.
 [void](Assert-PinnedRunnerBinary `
     -Layout $layout `
     -ExpectedFileCount ([int]$installation.payloadFileCount) `

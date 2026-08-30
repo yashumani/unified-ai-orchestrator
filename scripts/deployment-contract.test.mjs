@@ -142,8 +142,15 @@ describe("Windows local-production deployment contract", () => {
       expect(common).toContain(contract);
     }
     const runnerStart = await deploymentScript("Start-GitHubRunner.ps1");
-    expect(runnerStart).toContain("Assert-GitHubRunnerTaskRegistration");
+    expect(runnerStart).toContain("Read-GitHubRunnerInstallation");
+    expect(runnerStart).not.toContain("Assert-GitHubRunnerTaskRegistration");
     expect(runnerStart).toContain("ExpectedTreeSha256");
+    expect(runnerStart.indexOf("ExpectedTreeSha256")).toBeLessThan(
+      runnerStart.indexOf("Write-AtomicJson -Layout $layout -Path $layout.RunnerProcess")
+    );
+    expect(runnerStart.indexOf("Write-AtomicJson -Layout $layout -Path $layout.RunnerProcess")).toBeLessThan(
+      runnerStart.indexOf('Join-Path $layout.RunnerRoot "run.cmd"')
+    );
   });
 
   it("installs a frozen recovery controller and qualifies it only after live verification", async () => {
