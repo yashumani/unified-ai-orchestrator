@@ -349,6 +349,7 @@ describe("Windows local-production deployment contract", () => {
     const common = await deploymentScript("Deployment.Common.ps1");
     const worker = powershellFunction(common, "Invoke-ReleaseTreeAclWorker");
     const boundedWorker = powershellFunction(common, "Invoke-ReleaseTreeAclProtectionProcess");
+    const protectRelease = powershellFunction(common, "Protect-ReleaseDirectory");
     const protectedAcl = powershellFunction(common, "Assert-ProtectedAclContract");
     const inventory = powershellFunction(common, "Get-ReleaseAclInventory");
 
@@ -361,6 +362,18 @@ describe("Windows local-production deployment contract", () => {
     expect(boundedWorker).toContain("-TimeoutSeconds $TimeoutSeconds");
     expect(boundedWorker).toContain("-EchoOutput");
     expect(boundedWorker).toContain("Explicit-entry release ACL protection");
+    expect(boundedWorker).toContain(
+      "[Parameter(Mandatory)][AllowEmptyCollection()][object[]]$WorkspaceLinks"
+    );
+    expect(protectRelease).toContain(
+      "[Parameter(Mandatory)][AllowEmptyCollection()][object[]]$WorkspaceLinks"
+    );
+    expect(worker).toContain("if ($allowedLinks.Count -gt 100)");
+    expect(worker).not.toContain("$allowedLinks.Count -lt 1");
+    expect(boundedWorker).toContain(
+      "ConvertTo-Json -InputObject $contracts -Compress -Depth 5"
+    );
+    expect(boundedWorker).not.toContain("-AsArray");
 
     expect(worker).toContain('Expression = "depth"; Descending = $true');
     expect(worker).toContain("Group-Object depth");

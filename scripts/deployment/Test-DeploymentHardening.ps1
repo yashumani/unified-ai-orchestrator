@@ -413,6 +413,109 @@ try {
 }
 
 $controllerReceipt = Test-RecoveryControllerManifest -Layout $layout -SourceRoot $PSScriptRoot
+$emptyAclReleaseName = "$([guid]::NewGuid().ToString('N'))$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$emptyAclProtectionRoot = Assert-ContainedPath `
+  -Root $layout.Releases `
+  -Path (Join-Path $layout.Releases $emptyAclReleaseName)
+$emptyAclOutsideRoot = Assert-ContainedPath `
+  -Root $layout.Staging `
+  -Path (Join-Path $layout.Staging "acl-empty-allowlist-target-$([guid]::NewGuid().ToString('N'))")
+$emptyAclUndeclaredJunction = Join-Path $emptyAclProtectionRoot "node_modules\undeclared-link"
+$emptyAclProtectionReceipt = $null
+$emptyAclUndeclaredJunctionRejected = $false
+try {
+  foreach ($directory in @(
+      (Join-Path $emptyAclProtectionRoot "apps\api"),
+      (Join-Path $emptyAclProtectionRoot "node_modules\plain")
+    )) {
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+  }
+  [System.IO.File]::WriteAllText(
+    (Join-Path $emptyAclProtectionRoot "apps\api\index.js"),
+    "api`n"
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $emptyAclProtectionRoot "node_modules\plain\index.js"),
+    "dependency`n"
+  )
+  $emptyAclCriticalPaths = [System.Collections.Generic.List[string]]::new()
+  for ($criticalPathIndex = 1; $criticalPathIndex -le 8; $criticalPathIndex++) {
+    $criticalPath = Join-Path $emptyAclProtectionRoot "critical-$($criticalPathIndex.ToString('00')).txt"
+    [System.IO.File]::WriteAllText($criticalPath, "critical-$criticalPathIndex`n")
+    $emptyAclCriticalPaths.Add($criticalPath)
+  }
+  [void](New-Item -ItemType Directory -Path $emptyAclOutsideRoot)
+  [System.IO.File]::WriteAllText((Join-Path $emptyAclOutsideRoot "outside.txt"), "outside`n")
+  $emptyAclOutsideBefore = (Get-Acl -LiteralPath $emptyAclOutsideRoot).Sddl
+  [void](New-Item -ItemType Junction -Path $emptyAclUndeclaredJunction -Target $emptyAclOutsideRoot)
+  $emptyAclIdentitySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  try {
+    [void](Protect-ReleaseDirectory `
+        -Layout $layout `
+        -ReleaseRoot $emptyAclProtectionRoot `
+        -IdentitySid $emptyAclIdentitySid `
+        -CriticalPaths @($emptyAclCriticalPaths) `
+        -WorkspaceLinks @())
+  } catch {
+    if ($_.Exception.Message -like "*undeclared or unsupported reparse point*") {
+      $emptyAclUndeclaredJunctionRejected = $true
+    } else {
+      throw
+    }
+  }
+  $emptyAclOutsideAfter = (Get-Acl -LiteralPath $emptyAclOutsideRoot).Sddl
+  if (-not $emptyAclUndeclaredJunctionRejected -or
+      $emptyAclOutsideAfter -cne $emptyAclOutsideBefore) {
+    throw "Empty workspace-link allowlist did not safely reject an undeclared junction."
+  }
+  Remove-Item -LiteralPath $emptyAclUndeclaredJunction -Force
+  $emptyAclProtectionReceipt = Protect-ReleaseDirectory `
+    -Layout $layout `
+    -ReleaseRoot $emptyAclProtectionRoot `
+    -IdentitySid $emptyAclIdentitySid `
+    -CriticalPaths @($emptyAclCriticalPaths) `
+    -WorkspaceLinks @()
+  [void](Assert-ProtectedAclContract `
+      -Path $emptyAclProtectionRoot `
+      -IdentitySid $emptyAclIdentitySid `
+      -IdentityAccess ReadAndExecute `
+      -DescendantAclMode Explicit `
+      -Recursive)
+  if ([int]$emptyAclProtectionReceipt.entryCount -lt 6 -or
+      [int]$emptyAclProtectionReceipt.reparsePointCount -ne 0 -or
+      [string]$emptyAclProtectionReceipt.inventorySha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [int64]$emptyAclProtectionReceipt.elapsedMilliseconds -lt 1) {
+    throw "Zero-link release ACL worker did not return its bounded evidence receipt."
+  }
+} finally {
+  if (Test-Path -LiteralPath $emptyAclUndeclaredJunction) {
+    $emptyAclUndeclaredJunctionItem = Get-Item -LiteralPath $emptyAclUndeclaredJunction -Force
+    if (($emptyAclUndeclaredJunctionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+      throw "Zero-link ACL hardening fixture cleanup found a non-reparse replacement path."
+    }
+    Remove-Item -LiteralPath $emptyAclUndeclaredJunction -Force
+  }
+  if (Test-Path -LiteralPath $emptyAclProtectionRoot -PathType Container) {
+    [void](Assert-ContainedPath -Root $layout.Releases -Path $emptyAclProtectionRoot)
+    $cleanupSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $cleanupOutput = & $script:CanonicalIcaclsPath `
+      $emptyAclProtectionRoot `
+      "/inheritance:e" `
+      "/grant:r" `
+      "*$($cleanupSid):(OI)(CI)F" `
+      "/T" `
+      "/C" `
+      "/Q" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to reopen the zero-link ACL hardening fixture: $($cleanupOutput -join [Environment]::NewLine)"
+    }
+    Remove-Item -LiteralPath $emptyAclProtectionRoot -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $emptyAclOutsideRoot -PathType Container) {
+    [void](Assert-ContainedPath -Root $layout.Staging -Path $emptyAclOutsideRoot)
+    Remove-Item -LiteralPath $emptyAclOutsideRoot -Recurse -Force
+  }
+}
 $aclProtectionRoot = Assert-ContainedPath `
   -Root $layout.Staging `
   -Path (Join-Path $layout.Staging "acl-protection-test-$([guid]::NewGuid().ToString('N'))")
@@ -895,6 +998,10 @@ try {
   nodeRuntimeTreeSha256 = [string]$nodeRuntime.payloadTreeSha256
   nodeRuntimeVerificationMilliseconds = [int64]$nodeRuntimeTimer.ElapsedMilliseconds
   runtimeTreeFaultsRejected = 5
+  emptyWorkspaceLinkReleaseAclEntries = [int]$emptyAclProtectionReceipt.entryCount
+  emptyWorkspaceLinkReleaseAclReparsePoints = [int]$emptyAclProtectionReceipt.reparsePointCount
+  emptyWorkspaceLinkReleaseAclInventorySha256 = [string]$emptyAclProtectionReceipt.inventorySha256
+  emptyWorkspaceLinkUndeclaredJunctionRejected = $emptyAclUndeclaredJunctionRejected
   explicitReleaseAclEntries = [int]$aclProtectionReceipt.entryCount
   explicitReleaseAclReparsePoints = [int]$aclProtectionReceipt.reparsePointCount
   explicitReleaseAclInventorySha256 = [string]$aclProtectionReceipt.inventorySha256
