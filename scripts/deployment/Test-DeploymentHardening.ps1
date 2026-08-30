@@ -756,10 +756,97 @@ $stateFixture = [ordered]@{
   LastKnownGoodController = Join-Path $stateTestRoot "state\last-known-good-controller.json"
   ControllerInstallation = Join-Path $stateTestRoot "state\recovery-controller-installation.json"
   TaskInstallation = Join-Path $stateTestRoot "state\local-production-task-installation.json"
+  Logs = Join-Path $stateTestRoot "logs"
 }
 try {
   [void](New-Item -ItemType Directory -Path $stateFixture.Backups -Force)
   [void](New-Item -ItemType Directory -Path (Join-Path $stateTestRoot "state") -Force)
+  $expectedProcessReceipt = [ordered]@{
+    schemaVersion = 2
+    commitSha = "6" * 40
+    pid = 4242
+    entrypoint = Join-Path $stateTestRoot "release\server.bundle.mjs"
+    nodePath = "C:\reviewed\node.exe"
+    nodeVersion = "v22.23.2"
+    nodeSha256 = "a" * 64
+    runtimeDependencyReceiptSha256 = "b" * 64
+    startedAtUtc = "2026-08-30T12:00:00.0000000+00:00"
+    stdoutPath = Join-Path $stateFixture.Logs "stdout.log"
+    stderrPath = Join-Path $stateFixture.Logs "stderr.log"
+    supervised = $true
+  }
+  Write-AtomicJson -Layout $stateFixture -Path $stateFixture.Process -Value $expectedProcessReceipt
+  if (Remove-MatchingReleaseProcessReceipt `
+      -Layout $stateFixture `
+      -ExpectedReceipt $expectedProcessReceipt `
+      -ChildConfirmedExited $false) {
+    throw "Process receipt cleanup removed a receipt without confirmed child exit."
+  }
+  if (-not (Test-Path -LiteralPath $stateFixture.Process -PathType Leaf)) {
+    throw "Process receipt cleanup lost a live-child receipt."
+  }
+
+  $replacementProcessReceipt = [ordered]@{}
+  foreach ($entry in $expectedProcessReceipt.GetEnumerator()) {
+    $replacementProcessReceipt[[string]$entry.Key] = $entry.Value
+  }
+  $replacementProcessReceipt.startedAtUtc = "2026-08-30T12:00:01.0000000+00:00"
+  Write-AtomicJson -Layout $stateFixture -Path $stateFixture.Process -Value $replacementProcessReceipt
+  if (Remove-MatchingReleaseProcessReceipt `
+      -Layout $stateFixture `
+      -ExpectedReceipt $expectedProcessReceipt `
+      -ChildConfirmedExited $true) {
+    throw "Process receipt cleanup removed a replacement process receipt."
+  }
+  $retainedReplacement = Read-JsonHashtable -Path $stateFixture.Process
+  if ([string]$retainedReplacement.startedAtUtc -cne [string]$replacementProcessReceipt.startedAtUtc) {
+    throw "Process receipt cleanup changed a replacement process receipt."
+  }
+
+  Write-AtomicJson -Layout $stateFixture -Path $stateFixture.Process -Value $expectedProcessReceipt
+  $outerReceiptMutex = Enter-DeploymentMutex
+  try {
+    if (-not (Remove-MatchingReleaseProcessReceipt `
+          -Layout $stateFixture `
+          -ExpectedReceipt $expectedProcessReceipt `
+          -ChildConfirmedExited $true)) {
+      throw "Process receipt cleanup retained an exact exited-child receipt."
+    }
+  } finally {
+    Exit-DeploymentMutex -Mutex $outerReceiptMutex
+  }
+  if (Test-Path -LiteralPath $stateFixture.Process) {
+    throw "Process receipt cleanup did not remove the exact exited-child receipt."
+  }
+
+  $startupDiagnosticPath = Join-Path $stateFixture.Logs "diagnostic-fixture\startup-diagnostic.json"
+  Write-StartupDiagnostic `
+    -Layout $stateFixture `
+    -Path $startupDiagnosticPath `
+    -CommitSha ("6" * 40) `
+    -RunId "20260830T120000Z-123456789abc" `
+    -ProcessId 4242 `
+    -Phase "failed" `
+    -PreCleanupState "running" `
+    -PostCleanupState "exited" `
+    -ExitCode 37 `
+    -FailureMessage ("x" * 700) `
+    -StdoutPath ([string]$expectedProcessReceipt.stdoutPath) `
+    -StderrPath ([string]$expectedProcessReceipt.stderrPath) `
+    -Supervised $true
+  $startupDiagnostic = Read-JsonHashtable -Path $startupDiagnosticPath
+  if ([int]$startupDiagnostic.schemaVersion -ne 1 -or
+      [string]$startupDiagnostic.phase -cne "failed" -or
+      [string]$startupDiagnostic.preCleanupState -cne "running" -or
+      [string]$startupDiagnostic.postCleanupState -cne "exited" -or
+      [int]$startupDiagnostic.exitCode -ne 37 -or
+      ([string]$startupDiagnostic.failureMessage).Length -ne 500 -or
+      @(
+        Get-ChildItem -LiteralPath (Split-Path -Parent $startupDiagnosticPath) -Force |
+          Where-Object { $_.Name -like ".startup-diagnostic.json.*.tmp" }
+      ).Count -ne 0) {
+    throw "Startup diagnostic did not persist the bounded atomic failure contract."
+  }
   Write-AtomicJson -Layout $stateFixture -Path $stateFixture.Current -Value ([ordered]@{ marker = "current-before" })
   Write-AtomicJson -Layout $stateFixture -Path $stateFixture.LastKnownGoodController -Value ([ordered]@{ marker = "controller-before" })
   $currentSnapshot = Read-OptionalJsonState -Layout $stateFixture -Path $stateFixture.Current
@@ -824,6 +911,59 @@ try {
     [void](Assert-ContainedPath -Root $layout.Staging -Path $stateTestRoot)
     Remove-Item -LiteralPath $stateTestRoot -Recurse -Force
   }
+}
+
+$earlyExitProbe = $null
+$hangingListener = $null
+$hangingConnection = $null
+$earlyExitTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$earlyExitRejected = $false
+$earlyExitMessage = ""
+try {
+  $hangingListener = [System.Net.Sockets.TcpListener]::new(
+    [System.Net.IPAddress]::Loopback,
+    0
+  )
+  $hangingListener.Start()
+  $hangingPort = ([System.Net.IPEndPoint]$hangingListener.LocalEndpoint).Port
+  $hangingConnection = $hangingListener.AcceptTcpClientAsync()
+  $earlyExitProbe = Start-Process `
+    -FilePath (Get-StableExecutable -Name "pwsh.exe") `
+    -ArgumentList @(
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Start-Sleep -Milliseconds 250; exit 37"
+    ) `
+    -WindowStyle Hidden `
+    -PassThru
+  try {
+    [void](Invoke-ObservedReleaseJsonRequest `
+        -Uri "http://127.0.0.1:$hangingPort/never-responds" `
+        -ObservedProcess $earlyExitProbe `
+        -RequestTimeoutMilliseconds 5000)
+  } catch {
+    $earlyExitRejected = $true
+    $earlyExitMessage = $_.Exception.Message
+  }
+} finally {
+  $earlyExitTimer.Stop()
+  if ($null -ne $earlyExitProbe -and -not $earlyExitProbe.HasExited) {
+    Stop-Process -Id $earlyExitProbe.Id -Force -ErrorAction SilentlyContinue
+    [void]$earlyExitProbe.WaitForExit(10000)
+  }
+  if ($null -ne $hangingListener) {
+    $hangingListener.Stop()
+  }
+  if ($null -ne $hangingConnection -and $hangingConnection.IsCompletedSuccessfully) {
+    $hangingConnection.Result.Dispose()
+  }
+}
+if (-not $earlyExitRejected -or
+    $earlyExitMessage -cne "Release process exited before health succeeded with code 37." -or
+    $earlyExitTimer.Elapsed.TotalSeconds -ge 5) {
+  throw "Observed early process exit was not classified quickly with its exact exit code: $earlyExitMessage"
 }
 
 $installRecoveryRoot = Assert-ContainedPath `
@@ -1010,5 +1150,10 @@ try {
   hardLinkReleaseEntryRejected = $hardLinkRejected
   aclContainmentContractsRejected = 2
   activationStateFaultsRejected = 5
+  processReceiptCleanupCases = 3
+  startupDiagnosticFailureMessageCharacters = 500
+  earlyExitHangingEndpoint = $true
+  earlyExitProcessCode = 37
+  earlyExitDetectionMilliseconds = [int64]$earlyExitTimer.ElapsedMilliseconds
   releaseInstallationRecoveryFaultsRejected = 4
 } | ConvertTo-Json -Depth 10

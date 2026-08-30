@@ -4,7 +4,7 @@ import {
   TrustStateSchema
 } from "@unified-ai/contracts";
 import { DashboardManifestSchema } from "@unified-ai/contracts/dashboard-builder";
-import type { RequestHandler } from "express";
+import express, { type RequestHandler } from "express";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { request as httpRequest } from "node:http";
@@ -38,6 +38,7 @@ const dashboardSampleManifest = DashboardManifestSchema.parse(
 );
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -222,12 +223,16 @@ describe("local API", () => {
   it("keeps the Copilot runtime scoped so the React bundle remains reachable", async () => {
     const webDistRoot = mkdtempSync(join(tmpdir(), "unified-ai-web-"));
     temporaryDirectories.push(webDistRoot);
-    writeFileSync(
-      join(webDistRoot, "index.html"),
+    const expectedIndex = Buffer.from(
       "<!doctype html><html><body>dashboard shell</body></html>",
       "utf8"
     );
+    writeFileSync(
+      join(webDistRoot, "index.html"),
+      expectedIndex
+    );
     const webConfig = { ...config, webDistRoot };
+    const sendFile = vi.spyOn(express.response, "sendFile");
     const app = await createApp({
       config: webConfig,
       services: services({ config: webConfig }),
@@ -245,7 +250,11 @@ describe("local API", () => {
 
     const web = await fetch(`${baseUrl}/`);
     expect(web.status).toBe(200);
-    await expect(web.text()).resolves.toContain("dashboard shell");
+    expect(Buffer.from(await web.arrayBuffer())).toEqual(expectedIndex);
+    expect(sendFile).toHaveBeenCalledWith(
+      "index.html",
+      expect.objectContaining({ root: webDistRoot })
+    );
 
     const copilot = await fetch(`${baseUrl}/api/copilotkit/unknown`);
     expect(copilot.status).toBe(404);

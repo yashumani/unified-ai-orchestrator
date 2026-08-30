@@ -147,7 +147,7 @@ export async function createApp(options: CreateAppOptions): Promise<Express> {
     if (existsSync(indexPath)) {
       app.use(express.static(options.config.webDistRoot, { index: false }));
       app.get(/^(?!\/api(?:\/|$)).*/u, (_request, response) => {
-        response.sendFile(indexPath);
+        response.sendFile("index.html", { root: options.config.webDistRoot });
       });
     }
   }
