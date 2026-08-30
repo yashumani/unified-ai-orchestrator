@@ -183,6 +183,9 @@ describe("Windows local-production deployment contract", () => {
     expect(common).toContain("AssignProcessToJobObject");
     expect(hardening).toContain("boundedProcessTreeTermination = $true");
     expect(hardening).toContain("Synthetic exited-parent process-tree fixture");
+    expect(hardening).toContain('$boundedJobChildCommand = "');
+    expect(hardening).toContain("$boundedJobChildCommandLiteral");
+    expect(hardening).not.toContain("'Start-Sleep -Seconds 30','$boundedJobMarker'");
     expect(boundedProcess).not.toContain("ReadToEndAsync");
     expect(boundedProcess.indexOf("combined output exceeded its reviewed bound")).toBeLessThan(
       boundedProcess.indexOf("stdout = $stdoutBuilder.ToString()")

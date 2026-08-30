@@ -21,7 +21,9 @@ $powerShellPath = Get-StableExecutable -Name "pwsh.exe"
 $expectedArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File `"C:\reviewed\Start.ps1`""
 
 $boundedJobMarker = "uai-bounded-job-$([guid]::NewGuid().ToString('N'))"
-$boundedJobRootCommand = "Start-Process -FilePath '$powerShellPath' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30','$boundedJobMarker') -NoNewWindow | Out-Null"
+$boundedJobChildCommand = "`$boundedJobMarker = '$boundedJobMarker'; Start-Sleep -Seconds 30"
+$boundedJobChildCommandLiteral = $boundedJobChildCommand.Replace("'", "''")
+$boundedJobRootCommand = "Start-Process -FilePath '$powerShellPath' -ArgumentList @('-NoProfile','-Command','$boundedJobChildCommandLiteral') -NoNewWindow | Out-Null"
 $boundedJobTimedOut = $false
 try {
   [void](Invoke-BoundedProcess `
