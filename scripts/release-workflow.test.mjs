@@ -48,15 +48,25 @@ describe("local production release workflow contract", () => {
     expect(workflow.match(/name: local-production/gu)).toHaveLength(3);
     expect(workflow).toContain("GH_REPO: ${{ github.repository }}");
     expect(workflow).toContain('tag="local-${RELEASE_SHA}"');
-    expect(workflow).toContain("gh release download");
+    expect(workflow).toContain('expected_upload_base="https://uploads.github.com/repos/${GH_REPO}/releases/${release_id}/assets"');
+    expect(workflow).toContain('api --method PATCH "repos/${GH_REPO}/releases/${release_id}"');
+    expect(workflow).toContain("curl --fail-with-body");
+    expect(workflow).toContain('test "${asset_state}" = "starter"');
+    expect(workflow).toContain('api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}"');
+    const createTag = workflow.indexOf('api --method POST "repos/${GH_REPO}/git/refs"');
+    const publishRelease = workflow.indexOf('api --method PATCH "repos/${GH_REPO}/releases/${release_id}"');
+    expect(createTag).toBeGreaterThan(0);
+    expect(createTag).toBeLessThan(publishRelease);
     expect(workflow).toContain('git/matching-refs/tags/${tag}');
-    expect(workflow).toContain('gh release create "${tag}"');
-    expect(workflow).toContain("--draft");
-    expect(workflow).toContain('gh release edit "${tag}" --draft=false');
+    expect(workflow).toContain('api --method POST "repos/${GH_REPO}/releases"');
+    expect(workflow).toContain("-F draft=true");
+    expect(workflow).toContain('release_id="$(jq -r \'.id // empty\' <<<"${release_json}")"');
+    expect(workflow).not.toContain("gh release ");
+    expect(workflow.match(/for attempt in \{1\.\.10\}/gu)).toHaveLength(4);
     expect(workflow).toContain(".immutable // false");
     expect(workflow).toContain("repos/${GH_REPO}/immutable-releases");
     expect(workflow.indexOf("repos/${GH_REPO}/immutable-releases")).toBeLessThan(
-      workflow.indexOf('gh release create "${tag}"')
+      workflow.indexOf('api --method POST "repos/${GH_REPO}/releases"')
     );
     expect(workflow).toContain('test "$(jq -r .draft <<<"${final_release_json}")" = "false"');
     expect(workflow).toContain('test "${tag_sha}" = "${RELEASE_SHA}"');
