@@ -171,20 +171,42 @@ jobs:
           mapfile -t release_ids < <(api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name == \"${tag}\") | .id")
           test "${#release_ids[@]}" -le 1
           if test "${#release_ids[@]}" -eq 0; then
-            gh release create "${tag}" \
-              --draft \
-              --target "${RELEASE_SHA}" \
-              --title "Local production ${RELEASE_SHA:0:12}" \
-              --notes "Verified local-production artifact for ${RELEASE_SHA}." \
-              --latest=false
-            mapfile -t release_ids < <(api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name == \"${tag}\") | .id")
-            test "${#release_ids[@]}" -eq 1
+            create_error="${RUNNER_TEMP}/release-create-error.txt"
+            if release_json="$(api --method POST "repos/${GH_REPO}/releases" \
+                -f tag_name="${tag}" \
+                -f target_commitish="${RELEASE_SHA}" \
+                -f name="Local production ${RELEASE_SHA:0:12}" \
+                -f body="Verified local-production artifact for ${RELEASE_SHA}." \
+                -F draft=true \
+                -F prerelease=false \
+                -f make_latest=false 2>"${create_error}")"; then
+              release_id="$(jq -r '.id // empty' <<<"${release_json}")"
+            else
+              release_id=""
+              for attempt in {1..10}; do
+                mapfile -t release_ids < <(api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name == \"${tag}\") | .id")
+                test "${#release_ids[@]}" -le 1
+                if test "${#release_ids[@]}" -eq 1; then
+                  release_id="${release_ids[0]}"
+                  break
+                fi
+                sleep 2
+              done
+              test -n "${release_id}"
+              release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+            fi
+            test -n "${release_id}"
+          else
+            release_id="${release_ids[0]}"
+            release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
           fi
-          release_id="${release_ids[0]}"
-          release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
           test "$(jq -r .tag_name <<<"${release_json}")" = "${tag}"
           test "$(jq -r .target_commitish <<<"${release_json}")" = "${RELEASE_SHA}"
           test "$(jq -r .prerelease <<<"${release_json}")" = "false"
+          upload_url="$(jq -r '.upload_url // empty' <<<"${release_json}")"
+          upload_base="${upload_url%%\{*}"
+          expected_upload_base="https://uploads.github.com/repos/${GH_REPO}/releases/${release_id}/assets"
+          test "${upload_base}" = "${expected_upload_base}"
           draft="$(jq -r .draft <<<"${release_json}")"
           immutable="$(jq -r '.immutable // false' <<<"${release_json}")"
           mapfile -t existing_names < <(jq -r '.assets[].name' <<<"${release_json}" | sort)
@@ -196,35 +218,87 @@ jobs:
           for asset in "${assets[@]}"; do
             name="$(basename "${asset}")"
             asset_id="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<<"${release_json}")"
+            asset_state="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .state' <<<"${release_json}")"
+            if test -n "${asset_id}" && test "${asset_state}" = "starter"; then
+              test "${draft}" = "true"
+              api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}"
+              asset_id=""
+            fi
             if test -n "${asset_id}"; then
+              test "${asset_state}" = "uploaded"
               api -H "Accept: application/octet-stream" "repos/${GH_REPO}/releases/assets/${asset_id}" > "${existing_dir}/${name}"
               cmp --silent "${asset}" "${existing_dir}/${name}"
             else
               test "${draft}" = "true"
-              gh release upload "${tag}" "${asset}"
+              encoded_name="$(jq -rn --arg name "${name}" '$name | @uri')"
+              curl --fail-with-body --silent --show-error --location \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header "X-GitHub-Api-Version: 2026-03-10" \
+                --header "Content-Type: application/octet-stream" \
+                --data-binary "@${asset}" \
+                --output /dev/null \
+                "${upload_base}?name=${encoded_name}"
             fi
           done
-          release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
-          mapfile -t uploaded_names < <(jq -r '.assets[].name' <<<"${release_json}" | sort)
+          uploaded_names=()
+          for attempt in {1..10}; do
+            release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+            mapfile -t uploaded_names < <(jq -r '.assets[].name' <<<"${release_json}" | sort)
+            if test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${uploaded_names[@]}")"; then
+              break
+            fi
+            sleep 2
+          done
           test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${uploaded_names[@]}")"
+          tag_sha="$(api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
+          if test -z "${tag_sha}"; then
+            tag_json="$(api --method POST "repos/${GH_REPO}/git/refs" \
+              -f ref="refs/tags/${tag}" \
+              -f sha="${RELEASE_SHA}")"
+            tag_sha="$(jq -r '.object.sha // empty' <<<"${tag_json}")"
+          fi
+          test "${tag_sha}" = "${RELEASE_SHA}"
           if test "${draft}" = "true"; then
             test "${immutable}" = "false"
-            gh release edit "${tag}" --draft=false --latest=false
+            api --method PATCH "repos/${GH_REPO}/releases/${release_id}" \
+              -F draft=false \
+              -F prerelease=false \
+              -f make_latest=false >/dev/null
           fi
-          final_release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+          final_release_json=""
+          for attempt in {1..10}; do
+            final_release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+            if test "$(jq -r .draft <<<"${final_release_json}")" = "false" && \
+              test "$(jq -r '.immutable // false' <<<"${final_release_json}")" = "true"; then
+              break
+            fi
+            sleep 2
+          done
           test "$(jq -r .draft <<<"${final_release_json}")" = "false"
           test "$(jq -r .prerelease <<<"${final_release_json}")" = "false"
           test "$(jq -r '.immutable // false' <<<"${final_release_json}")" = "true"
           test "$(jq -r .target_commitish <<<"${final_release_json}")" = "${RELEASE_SHA}"
-          tag_sha="$(api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
+          tag_sha=""
+          for attempt in {1..10}; do
+            tag_sha="$(api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
+            if test "${tag_sha}" = "${RELEASE_SHA}"; then
+              break
+            fi
+            sleep 2
+          done
           test "${tag_sha}" = "${RELEASE_SHA}"
           mapfile -t final_names < <(jq -r '.assets[].name' <<<"${final_release_json}" | sort)
           test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${final_names[@]}")"
           final_dir="${RUNNER_TEMP}/final-release-${RELEASE_SHA}"
           mkdir "${final_dir}"
-          gh release download "${tag}" --dir "${final_dir}"
           for asset in "${assets[@]}"; do
-            cmp --silent "${asset}" "${final_dir}/$(basename "${asset}")"
+            name="$(basename "${asset}")"
+            asset_id="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<<"${final_release_json}")"
+            test -n "${asset_id}"
+            api -H "Accept: application/octet-stream" "repos/${GH_REPO}/releases/assets/${asset_id}" > "${final_dir}/${name}"
+            cmp --silent "${asset}" "${final_dir}/${name}"
           done
 
   deploy:
