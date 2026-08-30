@@ -17,6 +17,53 @@ $identity = Get-CurrentWindowsIdentityReceipt
 $nodeRuntimeTimer = [System.Diagnostics.Stopwatch]::StartNew()
 $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $layout -ExecuteVersionChecks
 $nodeRuntimeTimer.Stop()
+$entrypointFixtureRoot = Assert-ContainedPath `
+  -Root $layout.Staging `
+  -Path (Join-Path $layout.Staging "entrypoint-contract-$([guid]::NewGuid().ToString('N'))")
+try {
+  $entrypointFixtureDist = Join-Path $entrypointFixtureRoot "apps\api\dist"
+  [void](New-Item -ItemType Directory -Path $entrypointFixtureDist -Force)
+  [System.IO.File]::WriteAllText(
+    (Join-Path $entrypointFixtureDist "server.js"),
+    "legacy",
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $entrypointFixtureDist "server.bundle.mjs"),
+    "bundle",
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  foreach ($legacySchema in @(3, 4, 5)) {
+    $legacyEntrypoint = Get-ReleaseServerEntrypoint `
+      -ReleaseRoot $entrypointFixtureRoot `
+      -RuntimeReceipt ([ordered]@{ schemaVersion = $legacySchema })
+    if ([System.IO.Path]::GetFileName($legacyEntrypoint) -cne "server.js") {
+      throw "Legacy receipt schema $legacySchema did not select server.js."
+    }
+  }
+  $bundledEntrypoint = Get-ReleaseServerEntrypoint `
+    -ReleaseRoot $entrypointFixtureRoot `
+    -RuntimeReceipt ([ordered]@{ schemaVersion = 6 })
+  if ([System.IO.Path]::GetFileName($bundledEntrypoint) -cne "server.bundle.mjs") {
+    throw "Bundled receipt schema 6 did not select server.bundle.mjs."
+  }
+  $unsupportedEntrypointRejected = $false
+  try {
+    [void](Get-ReleaseServerEntrypoint `
+        -ReleaseRoot $entrypointFixtureRoot `
+        -RuntimeReceipt ([ordered]@{ schemaVersion = 2 }))
+  } catch {
+    $unsupportedEntrypointRejected = $true
+  }
+  if (-not $unsupportedEntrypointRejected) {
+    throw "Unsupported runtime receipt schema selected a server entrypoint."
+  }
+} finally {
+  if (Test-Path -LiteralPath $entrypointFixtureRoot) {
+    [void](Assert-ContainedPath -Root $layout.Staging -Path $entrypointFixtureRoot)
+    Remove-Item -LiteralPath $entrypointFixtureRoot -Recurse -Force
+  }
+}
 $powerShellPath = Get-StableExecutable -Name "pwsh.exe"
 $expectedArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File `"C:\reviewed\Start.ps1`""
 
@@ -840,6 +887,7 @@ try {
   jsonTimestampStringPreserved = $true
   nestedReparseQuarantineRejected = $true
   crossTransactionPendingRejected = $true
+  releaseEntrypointSchemasVerified = 4
   controllerVersion = [string]$controllerReceipt.controllerVersion
   controllerManifestSha256 = [string]$controllerReceipt.controllerManifestSha256
   nodeRuntimeVersion = [string]$nodeRuntime.version

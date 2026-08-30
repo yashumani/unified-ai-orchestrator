@@ -220,6 +220,23 @@ try {
     Assert-NoDeploymentReparsePoints -Layout $layout
     Write-DeploymentEvent -Layout $layout -Action "lock-recovery" -Status "info" -Message "Recovered an abandoned Node-runtime installation mutex after revalidating deployment paths."
   }
+  $deploymentRecoveryPending = (
+    (Test-Path -LiteralPath $layout.Pending -PathType Leaf) -or
+    (Test-Path -LiteralPath $layout.ReleaseInstallationPending -PathType Leaf)
+  )
+  if ($deploymentRecoveryPending) {
+    Assert-NoDeploymentReparsePoints -Layout $layout
+    Assert-NoForeignDeploymentPendingRecords `
+      -Layout $layout `
+      -AllowedPaths @($layout.Pending, $layout.ReleaseInstallationPending)
+    [void](Recover-InterruptedDeploymentActivation `
+        -Layout $layout `
+        -RepositoryRoot $RepositoryRoot `
+        -TaskName $script:CanonicalTaskName `
+        -HealthUri $script:CanonicalHealthUri `
+        -HealthTimeoutSeconds 180)
+    [void](Recover-InterruptedReleaseInstallation -Layout $layout)
+  }
   Assert-NoForeignDeploymentPendingRecords `
     -Layout $layout `
     -AllowedPaths @($layout.NodeRuntimeInstallationPending)

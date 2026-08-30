@@ -94,26 +94,13 @@ try {
       [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $stagingRoot -ExpectedSha $ExpectedSha)
       Move-Item -LiteralPath $stagingRoot -Destination $releaseRoot
       $nodePath = [string]$nodeRuntime.nodePath
-      $npmPath = [string]$nodeRuntime.npmPath
-      Push-Location $releaseRoot
-      try {
-        & $npmPath ci --omit=dev --ignore-scripts --no-audit --no-fund --prefer-offline
-        if ($LASTEXITCODE -ne 0) {
-          throw "npm ci failed with exit code $LASTEXITCODE."
-        }
-      } finally {
-        Pop-Location
-      }
-      if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot "node_modules") -PathType Container)) {
-        throw "npm ci did not produce the release node_modules directory."
-      }
+      [void](Read-BundledRuntimeBuildReceipt -ReleaseRoot $releaseRoot)
       [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
       $runtimeReceipt = Write-SealedRuntimeDependencyAttestation `
         -Layout $layout `
         -ReleaseRoot $releaseRoot `
         -ExpectedSha $ExpectedSha `
-        -NodePath $nodePath `
-        -NpmPath $npmPath
+        -NodePath $nodePath
       Remove-Item -LiteralPath $layout.ReleaseInstallationPending -Force
       $releaseInstallPendingWritten = $false
     } finally {

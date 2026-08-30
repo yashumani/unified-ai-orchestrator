@@ -88,16 +88,27 @@ describe("local production release workflow contract", () => {
       workflow.indexOf("  rollback:")
     );
     expect(deployJob).not.toContain("actions/setup-node");
-    expect(deployJob.indexOf("Install-PinnedNodeRuntime.ps1")).toBeLessThan(
-      deployJob.indexOf("Test-DeploymentHardening.ps1")
+    const checkout = deployJob.indexOf("actions/checkout@");
+    const firstDeploymentScript = deployJob.indexOf("./scripts/deployment/");
+    const nodeInstaller = deployJob.indexOf("Install-PinnedNodeRuntime.ps1");
+    const hardening = deployJob.indexOf("Test-DeploymentHardening.ps1");
+    const artifactDownload = deployJob.indexOf("actions/download-artifact@");
+    const canonicalSync = deployJob.indexOf("Sync-CanonicalMain.ps1");
+    expect(checkout).toBeGreaterThan(0);
+    expect(deployJob.slice(firstDeploymentScript, firstDeploymentScript + 120)).toContain(
+      "Install-PinnedNodeRuntime.ps1"
     );
+    expect(nodeInstaller).toBeGreaterThan(checkout);
+    expect(hardening).toBeGreaterThan(nodeInstaller);
+    expect(artifactDownload).toBeGreaterThan(hardening);
+    expect(canonicalSync).toBeGreaterThan(artifactDownload);
     expect(workflow).toContain("Sync-CanonicalMain.ps1");
     expect(workflow).toContain("Install-RecoveryControllerArtifact.ps1");
     expect(workflow).toContain("Install-LocalProductionTask.ps1");
     expect(workflow).toContain("Deploy-LocalRelease.ps1");
     const controllerActivation = deployJob.indexOf("Install-LocalProductionTask.ps1");
     const deployInvocation = deployJob.indexOf("Deploy-LocalRelease.ps1");
-    expect(controllerActivation).toBeGreaterThan(0);
+    expect(controllerActivation).toBeGreaterThan(canonicalSync);
     expect(deployInvocation).toBeGreaterThan(controllerActivation);
     expect(deployJob.slice(deployInvocation)).not.toContain("Install-LocalProductionTask.ps1");
     expect(deployJob.slice(deployInvocation)).not.toContain("Test-LocalRelease.ps1");

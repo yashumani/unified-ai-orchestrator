@@ -56,9 +56,11 @@ try {
 
   $nodePath = [string]$runtimeReceipt.nodePath
   $nodeVersion = Assert-NodeRuntime -NodePath $nodePath
-  $entrypoint = Join-Path $releaseRoot "apps\api\dist\server.js"
+  $entrypoint = Get-ReleaseServerEntrypoint `
+    -ReleaseRoot $releaseRoot `
+    -RuntimeReceipt $runtimeReceipt
   $webDistRoot = Join-Path $releaseRoot "apps\web\dist"
-  foreach ($requiredPath in @($entrypoint, (Join-Path $webDistRoot "index.html"))) {
+  foreach ($requiredPath in @((Join-Path $webDistRoot "index.html"))) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
       throw "Selected release is missing required runtime file $requiredPath."
     }

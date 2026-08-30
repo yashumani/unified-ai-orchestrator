@@ -34,6 +34,13 @@ $script:PinnedNodeArchiveSha256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb
 $script:PinnedNodeArchiveUrl = "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip"
 $script:ShaPattern = "^[0-9a-f]{40}$"
 $script:RuntimeAttestationKind = "npm-lock-graph-v1"
+$script:BundledRuntimeAttestationKind = "esbuild-bundle-v1"
+$script:BundledRuntimeBuilderVersion = "0.28.2"
+$script:BundledRuntimeFeatureGuard = "copilotkit-channels-disabled-v1"
+$script:BundledRuntimeResolutionGuard = "node-builtins-only-v1"
+$script:BundledRuntimeBuilderPackageIntegrity = "sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA=="
+$script:BundledRuntimePath = "apps/api/dist/server.bundle.mjs"
+$script:BundledRuntimeBuildReceiptPath = "apps/api/dist/server.bundle.json"
 $script:RuntimeAttestationGraphTimeoutSeconds = 120
 $script:RuntimeAttestationReleaseProtectionTimeoutSeconds = 1800
 $script:RuntimeAttestationSealProtectionTimeoutSeconds = 30
@@ -45,6 +52,11 @@ $script:CriticalReleasePayloadPaths = @(
   "apps/api/package.json",
   "apps/api/dist/server.js",
   "apps/web/dist/index.html"
+)
+$script:BundledRuntimeCriticalPayloadPaths = @(
+  $script:CriticalReleasePayloadPaths
+  $script:BundledRuntimePath
+  $script:BundledRuntimeBuildReceiptPath
 )
 
 function Assert-CanonicalRepositoryRoot {
@@ -1068,7 +1080,8 @@ function Get-CriticalReleasePayloadAttestation {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
-    [Parameter(Mandatory)][string]$ExpectedSha
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [string[]]$PayloadPaths = $script:CriticalReleasePayloadPaths
   )
 
   [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
@@ -1082,7 +1095,11 @@ function Get-CriticalReleasePayloadAttestation {
   $manifest = Read-JsonHashtable -Path $manifestPath
   Assert-ReleaseManifest -Manifest $manifest -ExpectedSha $ExpectedSha
   $criticalHashes = [ordered]@{}
-  foreach ($relativePath in $script:CriticalReleasePayloadPaths) {
+  if ($PayloadPaths.Count -lt 5 -or $PayloadPaths.Count -gt 64 -or
+      @($PayloadPaths | Select-Object -Unique).Count -ne $PayloadPaths.Count) {
+    throw "Critical release payload path contract is invalid."
+  }
+  foreach ($relativePath in $PayloadPaths) {
     $payloadPath = Assert-SafePayloadPath -RelativePath $relativePath -DestinationRoot $releaseRootFull
     if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
       throw "Installed release is missing critical payload path $relativePath."
@@ -1104,6 +1121,266 @@ function Get-CriticalReleasePayloadAttestation {
     packageLockSha256 = [string]$criticalHashes["package-lock.json"]
     criticalPayloadSha256 = $criticalHashes
   }
+}
+
+function Get-BundledRuntimeContainedPath {
+  param(
+    [Parameter(Mandatory)][string]$Root,
+    [Parameter(Mandatory)][string]$RelativePath
+  )
+
+  if ($RelativePath.Length -lt 1 -or
+      $RelativePath.Length -gt 240 -or
+      [System.IO.Path]::IsPathRooted($RelativePath) -or
+      $RelativePath.Contains([char]0)) {
+    throw "Bundled runtime relative path is invalid: $RelativePath"
+  }
+  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+    [System.IO.Path]::DirectorySeparatorChar,
+    [System.IO.Path]::AltDirectorySeparatorChar
+  )
+  $pathFull = [System.IO.Path]::GetFullPath((Join-Path $rootFull $RelativePath))
+  $relative = [System.IO.Path]::GetRelativePath($rootFull, $pathFull)
+  if ($relative -ceq ".." -or
+      $relative.StartsWith("..$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::Ordinal) -or
+      [System.IO.Path]::IsPathRooted($relative)) {
+    throw "Bundled runtime path escaped its reviewed root: $pathFull"
+  }
+  return $pathFull
+}
+
+function Assert-BundledRuntimeRegularFile {
+  param(
+    [Parameter(Mandatory)][string]$Root,
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][uint64]$MinimumBytes,
+    [Parameter(Mandatory)][uint64]$MaximumBytes
+  )
+
+  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+    [System.IO.Path]::DirectorySeparatorChar,
+    [System.IO.Path]::AltDirectorySeparatorChar
+  )
+  $pathFull = [System.IO.Path]::GetFullPath($Path)
+  $relative = [System.IO.Path]::GetRelativePath($rootFull, $pathFull)
+  if ($relative -ceq ".." -or
+      $relative.StartsWith("..$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::Ordinal) -or
+      [System.IO.Path]::IsPathRooted($relative)) {
+    throw "Bundled runtime path escaped its reviewed root: $pathFull"
+  }
+  if (-not (Test-Path -LiteralPath $pathFull -PathType Leaf)) {
+    throw "Bundled runtime regular file is missing: $pathFull"
+  }
+  $leaf = Get-Item -LiteralPath $pathFull -Force
+  if ([uint64]$leaf.Length -lt $MinimumBytes -or [uint64]$leaf.Length -gt $MaximumBytes) {
+    throw "Bundled runtime regular file is outside its reviewed size bound: $pathFull"
+  }
+  $currentPath = $pathFull
+  while ($true) {
+    $currentItem = Get-Item -LiteralPath $currentPath -Force
+    if (($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Bundled runtime path cannot contain a reparse point: $currentPath"
+    }
+    $pathComparison = if ([System.OperatingSystem]::IsWindows()) {
+      [System.StringComparison]::OrdinalIgnoreCase
+    } else {
+      [System.StringComparison]::Ordinal
+    }
+    if ([string]::Equals(
+        [System.IO.Path]::GetFullPath($currentPath).TrimEnd(
+          [System.IO.Path]::DirectorySeparatorChar,
+          [System.IO.Path]::AltDirectorySeparatorChar
+        ),
+        $rootFull,
+        $pathComparison
+      )) {
+      break
+    }
+    $parent = [System.IO.Directory]::GetParent($currentPath)
+    if ($null -eq $parent) {
+      throw "Bundled runtime path escaped its reviewed root: $pathFull"
+    }
+    $currentPath = $parent.FullName
+  }
+  return $leaf
+}
+
+function Read-StrictBundledRuntimeBuildReceipt {
+  param(
+    [Parameter(Mandatory)][string]$Path
+  )
+
+  $receiptBytes = [System.IO.File]::ReadAllBytes($Path)
+  $options = [System.Text.Json.JsonDocumentOptions]::new()
+  $options.AllowTrailingCommas = $false
+  $options.CommentHandling = [System.Text.Json.JsonCommentHandling]::Disallow
+  $options.MaxDepth = 8
+  try {
+    $memory = [System.ReadOnlyMemory[byte]]::new($receiptBytes)
+    $document = [System.Text.Json.JsonDocument]::Parse($memory, $options)
+  } catch {
+    throw "Bundled runtime build receipt is not strict JSON: $($_.Exception.Message)"
+  }
+  try {
+    if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+      throw "Bundled runtime build receipt must be one JSON object."
+    }
+    $requiredKeys = @(
+      "schemaVersion", "buildKind", "builder", "builderVersion", "builderPackageIntegrity",
+      "builderBinaryPackage", "builderBinaryIntegrity", "entrypoint", "output",
+      "platform", "format", "target", "nodeVersion", "buildPlatform", "buildArchitecture",
+      "requireBridge", "runtimeFeatureGuard", "runtimeResolutionGuard", "bundleSha256",
+      "bundleBytes"
+    )
+    $required = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($requiredKey in $requiredKeys) {
+      [void]$required.Add($requiredKey)
+    }
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $receipt = [ordered]@{}
+    foreach ($property in $document.RootElement.EnumerateObject()) {
+      if (-not $seen.Add($property.Name)) {
+        throw "Bundled runtime build receipt contains a duplicate key: $($property.Name)"
+      }
+      if (-not $required.Contains($property.Name)) {
+        throw "Bundled runtime build receipt contains an unreviewed key: $($property.Name)"
+      }
+      if ($property.Name -ceq "schemaVersion") {
+        $value = 0
+        if ($property.Value.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or
+            -not $property.Value.TryGetInt32([ref]$value)) {
+          throw "Bundled runtime schemaVersion must be a JSON integer."
+        }
+        $receipt[$property.Name] = $value
+      } elseif ($property.Name -ceq "bundleBytes") {
+        [uint64]$value = 0
+        if ($property.Value.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or
+            -not $property.Value.TryGetUInt64([ref]$value)) {
+          throw "Bundled runtime bundleBytes must be a JSON unsigned integer."
+        }
+        $receipt[$property.Name] = $value
+      } else {
+        if ($property.Value.ValueKind -ne [System.Text.Json.JsonValueKind]::String) {
+          throw "Bundled runtime receipt field $($property.Name) must be a JSON string."
+        }
+        $receipt[$property.Name] = $property.Value.GetString()
+      }
+    }
+    if ($seen.Count -ne $required.Count -or
+        @($requiredKeys | Where-Object { -not $seen.Contains($_) }).Count -ne 0) {
+      throw "Bundled runtime build receipt is missing a required exact-case key."
+    }
+    return $receipt
+  } finally {
+    $document.Dispose()
+  }
+}
+
+function Read-BundledRuntimeBuildReceipt {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot
+  )
+
+  $releaseRootFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+  $receiptPath = Get-BundledRuntimeContainedPath `
+    -Root $releaseRootFull `
+    -RelativePath $script:BundledRuntimeBuildReceiptPath
+  $bundlePath = Get-BundledRuntimeContainedPath `
+    -Root $releaseRootFull `
+    -RelativePath $script:BundledRuntimePath
+  $packageLockPath = Get-BundledRuntimeContainedPath `
+    -Root $releaseRootFull `
+    -RelativePath "package-lock.json"
+  [void](Assert-BundledRuntimeRegularFile -Root $releaseRootFull -Path $receiptPath -MinimumBytes 1 -MaximumBytes 65536)
+  $bundle = Assert-BundledRuntimeRegularFile -Root $releaseRootFull -Path $bundlePath -MinimumBytes 1 -MaximumBytes 104857600
+  [void](Assert-BundledRuntimeRegularFile -Root $releaseRootFull -Path $packageLockPath -MinimumBytes 1 -MaximumBytes 104857600)
+  $receipt = Read-StrictBundledRuntimeBuildReceipt -Path $receiptPath
+  if ([int]$receipt.schemaVersion -ne 2 -or
+      [string]$receipt.buildKind -cne $script:BundledRuntimeAttestationKind -or
+      [string]$receipt.builder -cne "esbuild" -or
+      [string]$receipt.builderVersion -cne $script:BundledRuntimeBuilderVersion -or
+      [string]$receipt.builderPackageIntegrity -cne $script:BundledRuntimeBuilderPackageIntegrity -or
+      [string]$receipt.entrypoint -cne "apps/api/dist/server.js" -or
+      [string]$receipt.output -cne $script:BundledRuntimePath -or
+      [string]$receipt.platform -cne "node" -or
+      [string]$receipt.format -cne "esm" -or
+      [string]$receipt.target -cne "node22" -or
+      [string]$receipt.nodeVersion -cne "v$($script:PinnedNodeVersion)" -or
+      [string]$receipt.buildArchitecture -cne "x64" -or
+      [string]$receipt.requireBridge -cne "node-builtins-only-require-v1" -or
+      [string]$receipt.runtimeFeatureGuard -cne $script:BundledRuntimeFeatureGuard -or
+      [string]$receipt.runtimeResolutionGuard -cne $script:BundledRuntimeResolutionGuard -or
+      [string]$receipt.bundleSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [uint64]$receipt.bundleBytes -lt 1 -or
+      [uint64]$receipt.bundleBytes -gt 104857600) {
+    throw "Bundled runtime build receipt does not match the reviewed production contract."
+  }
+  $builderBinaryValid = (
+    ([string]$receipt.builderBinaryPackage -ceq "@esbuild/linux-x64" -and
+      [string]$receipt.builderBinaryIntegrity -ceq "sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ==" -and
+      [string]$receipt.buildPlatform -ceq "linux") -or
+    ([string]$receipt.builderBinaryPackage -ceq "@esbuild/win32-x64" -and
+      [string]$receipt.builderBinaryIntegrity -ceq "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g==" -and
+      [string]$receipt.buildPlatform -ceq "win32")
+  )
+  if (-not $builderBinaryValid) {
+    throw "Bundled runtime build receipt does not identify a reviewed esbuild platform binary."
+  }
+  $bundleSha256 = (Get-FileHash -LiteralPath $bundlePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ([uint64]$bundle.Length -ne [uint64]$receipt.bundleBytes -or
+      $bundleSha256 -cne [string]$receipt.bundleSha256) {
+    throw "Bundled runtime bytes do not match their deterministic build receipt."
+  }
+  $packageLock = Read-JsonHashtable -Path $packageLockPath
+  $builderBinaryLockPath = "node_modules/$([string]$receipt.builderBinaryPackage)"
+  if (-not $packageLock.Contains("packages") -or
+      $packageLock.packages -isnot [System.Collections.IDictionary] -or
+      -not $packageLock.packages.Contains("") -or
+      $packageLock.packages[""].devDependencies -isnot [System.Collections.IDictionary] -or
+      [string]$packageLock.packages[""].devDependencies.esbuild -cne $script:BundledRuntimeBuilderVersion -or
+      -not $packageLock.packages.Contains("node_modules/esbuild") -or
+      [string]$packageLock.packages["node_modules/esbuild"].version -cne $script:BundledRuntimeBuilderVersion -or
+      [string]$packageLock.packages["node_modules/esbuild"].integrity -cne $script:BundledRuntimeBuilderPackageIntegrity -or
+      -not $packageLock.packages.Contains($builderBinaryLockPath) -or
+      [string]$packageLock.packages[$builderBinaryLockPath].version -cne $script:BundledRuntimeBuilderVersion -or
+      [string]$packageLock.packages[$builderBinaryLockPath].integrity -cne [string]$receipt.builderBinaryIntegrity) {
+    throw "package-lock.json does not pin the reviewed bundled-runtime builder and selected binary."
+  }
+  return [ordered]@{
+    receipt = $receipt
+    receiptPath = $receiptPath
+    bundlePath = $bundlePath
+    bundleSha256 = $bundleSha256
+    bundleBytes = [uint64]$bundle.Length
+  }
+}
+
+function Get-BundledRuntimeCriticalPaths {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot
+  )
+
+  $releaseRootFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+  $paths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+  )
+  foreach ($relativePath in @("release-manifest.json", "runtime-integrity.json") + $script:BundledRuntimeCriticalPayloadPaths) {
+    $path = [System.IO.Path]::GetFullPath((Join-Path $releaseRootFull $relativePath))
+    [void](Assert-ContainedPath -Root $releaseRootFull -Path $path)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Bundled runtime critical path is missing: $relativePath"
+    }
+    [void]$paths.Add($path)
+  }
+  if ($paths.Count -lt 8 -or $paths.Count -gt 64) {
+    throw "Bundled runtime critical-path count is outside the reviewed range."
+  }
+  $orderedPaths = [System.Collections.Generic.List[string]]::new()
+  foreach ($path in $paths) {
+    $orderedPaths.Add($path)
+  }
+  $orderedPaths.Sort([System.StringComparer]::OrdinalIgnoreCase)
+  return @($orderedPaths)
 }
 
 function Get-RuntimeWorkspaceLinkContract {
@@ -1920,68 +2197,46 @@ function Write-SealedRuntimeDependencyAttestation {
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$ExpectedSha,
-    [Parameter(Mandatory)][string]$NodePath,
-    [Parameter(Mandatory)][string]$NpmPath
+    [Parameter(Mandatory)][string]$NodePath
   )
 
   [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
   $criticalPayload = Get-CriticalReleasePayloadAttestation `
     -Layout $Layout `
     -ReleaseRoot $ReleaseRoot `
-    -ExpectedSha $ExpectedSha
+    -ExpectedSha $ExpectedSha `
+    -PayloadPaths $script:BundledRuntimeCriticalPayloadPaths
+  $bundledRuntime = Read-BundledRuntimeBuildReceipt -ReleaseRoot $ReleaseRoot
   $NodePath = [System.IO.Path]::GetFullPath($NodePath)
-  $NpmPath = [System.IO.Path]::GetFullPath($NpmPath)
   $nodeRuntime = Read-PinnedNodeRuntimeAttestation -Layout $Layout
-  if (-not [string]::Equals($NodePath, [string]$nodeRuntime.nodePath, [System.StringComparison]::OrdinalIgnoreCase) -or
-      -not [string]::Equals($NpmPath, [string]$nodeRuntime.npmPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not [string]::Equals($NodePath, [string]$nodeRuntime.nodePath, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Release installation must use the qualified D-backed Node.js runtime."
   }
   $nodeVersion = Assert-NodeRuntime -NodePath $NodePath
   if ($nodeVersion -cne "v22.23.2") {
     throw "Release installation requires the exact Node.js runtime v22.23.2; observed $nodeVersion."
   }
-  if ([string]$nodeRuntime.npmVersion -cne "10.9.8") {
-    throw "Unable to attest the pinned npm 10.9.8 runtime."
-  }
-  $packageLockPath = Join-Path $ReleaseRoot "package-lock.json"
-  $packageLock = Read-JsonHashtable -Path $packageLockPath
-  $workspaceLinks = Get-RuntimeWorkspaceLinkContract -ReleaseRoot $ReleaseRoot -PackageLock $packageLock
-  $graph = Get-PinnedNpmDependencyGraphReceipt -ReleaseRoot $ReleaseRoot -NodeRuntime $nodeRuntime
-  $hiddenPackageLockPath = Join-Path $ReleaseRoot "node_modules\.package-lock.json"
-  $hiddenPackageLockSha256 = $null
-  if (Test-Path -LiteralPath $hiddenPackageLockPath -PathType Leaf) {
-    $hiddenPackageLockItem = Get-Item -LiteralPath $hiddenPackageLockPath -Force
-    if (($hiddenPackageLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-      throw "Installed hidden package lock cannot be a reparse point."
-    }
-    $hiddenPackageLockSha256 = (Get-FileHash -LiteralPath $hiddenPackageLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
-  }
   $identity = Get-CurrentWindowsIdentityReceipt
   $receipt = [ordered]@{
-    schemaVersion = 5
-    attestationKind = $script:RuntimeAttestationKind
+    schemaVersion = 6
+    attestationKind = $script:BundledRuntimeAttestationKind
     aclProtectionKind = $script:RuntimeAttestationAclProtectionKind
     commitSha = $ExpectedSha
     releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256
     packageLockSha256 = [string]$criticalPayload.packageLockSha256
     criticalPayloadSha256 = $criticalPayload.criticalPayloadSha256
-    hiddenPackageLockSha256 = $hiddenPackageLockSha256
+    bundlePath = $script:BundledRuntimePath
+    bundleSha256 = [string]$bundledRuntime.bundleSha256
+    bundleBytes = [uint64]$bundledRuntime.bundleBytes
+    bundleBuildReceiptSha256 = [string]$criticalPayload.criticalPayloadSha256[$script:BundledRuntimeBuildReceiptPath]
     nodePath = $NodePath
     nodeVersion = $nodeVersion
     nodeSha256 = [string]$nodeRuntime.nodeSha256
-    npmPath = $NpmPath
-    npmVersion = [string]$nodeRuntime.npmVersion
-    npmSha256 = [string]$nodeRuntime.npmSha256
-    npmCliPath = [string]$nodeRuntime.npmCliPath
-    npmCliSha256 = [string]$nodeRuntime.npmCliSha256
     nodeRuntimeArchiveSha256 = [string]$nodeRuntime.archiveSha256
     nodeRuntimeFileCount = [int]$nodeRuntime.payloadFileCount
     nodeRuntimeTreeSha256 = [string]$nodeRuntime.payloadTreeSha256
     identityName = [string]$identity.identityName
     identitySid = [string]$identity.identitySid
-    dependencyGraphNodeCount = [int]$graph.dependencyGraphNodeCount
-    dependencyGraphSha256 = [string]$graph.dependencyGraphSha256
-    workspaceLinkCount = [int]$workspaceLinks.count
   }
   $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
   if (Test-Path -LiteralPath $receiptPath) {
@@ -1995,10 +2250,7 @@ function Write-SealedRuntimeDependencyAttestation {
   }
   Write-AtomicJson -Layout $Layout -Path $receiptPath -Value $receipt
   $receiptSha256 = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
-  $criticalPaths = @(Get-BoundedReleaseCriticalPaths `
-      -ReleaseRoot $ReleaseRoot `
-      -WorkspaceLinks $workspaceLinks `
-      -IncludeHiddenPackageLock:($null -ne $hiddenPackageLockSha256))
+  $criticalPaths = @(Get-BundledRuntimeCriticalPaths -ReleaseRoot $ReleaseRoot)
   Write-Host "[runtime-attestation:release-protection-start] timeoutSeconds=$script:RuntimeAttestationReleaseProtectionTimeoutSeconds mode=$script:RuntimeAttestationAclProtectionKind"
   $protectionTimer = [System.Diagnostics.Stopwatch]::StartNew()
   $protection = Protect-ReleaseDirectory `
@@ -2006,16 +2258,17 @@ function Write-SealedRuntimeDependencyAttestation {
     -ReleaseRoot $ReleaseRoot `
     -IdentitySid ([string]$identity.identitySid) `
     -CriticalPaths $criticalPaths `
-    -WorkspaceLinks @($workspaceLinks.links)
+    -WorkspaceLinks @()
   $protectionTimer.Stop()
   Write-Host "[runtime-attestation:release-protection-complete] elapsedMilliseconds=$($protectionTimer.ElapsedMilliseconds) entries=$($protection.entryCount) inventorySha256=$($protection.inventorySha256)"
   Write-AtomicJson -Layout $Layout -Path $sealPath -Value ([ordered]@{
-      schemaVersion = 3
-      attestationKind = $script:RuntimeAttestationKind
+      schemaVersion = 4
+      attestationKind = $script:BundledRuntimeAttestationKind
       aclProtectionKind = $script:RuntimeAttestationAclProtectionKind
       commitSha = $ExpectedSha
       runtimeIntegritySha256 = $receiptSha256
-      dependencyGraphSha256 = [string]$graph.dependencyGraphSha256
+      bundleSha256 = [string]$bundledRuntime.bundleSha256
+      bundleBuildReceiptSha256 = [string]$receipt.bundleBuildReceiptSha256
       releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256
       createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     })
@@ -2058,8 +2311,121 @@ function Write-RuntimeDependencyIntegrity {
       -Layout $Layout `
       -ReleaseRoot $ReleaseRoot `
       -ExpectedSha $ExpectedSha `
-      -NodePath $NodePath `
-      -NpmPath $NpmPath)
+      -NodePath $NodePath)
+}
+
+function Test-SealedBundledRuntimeAttestation {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$CriticalPayload,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Receipt,
+    [Parameter(Mandatory)][string]$ReceiptPath,
+    [string]$ExpectedReceiptSha256
+  )
+
+  $requiredKeys = @(
+    "schemaVersion", "attestationKind", "aclProtectionKind", "commitSha",
+    "releaseManifestSha256", "packageLockSha256", "criticalPayloadSha256",
+    "bundlePath", "bundleSha256", "bundleBytes", "bundleBuildReceiptSha256",
+    "nodePath", "nodeVersion", "nodeSha256", "nodeRuntimeArchiveSha256",
+    "nodeRuntimeFileCount", "nodeRuntimeTreeSha256", "identityName", "identitySid"
+  )
+  if (@($Receipt.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
+      @($requiredKeys | Where-Object { $_ -notin $Receipt.Keys }).Count -ne 0 -or
+      [int]$Receipt.schemaVersion -ne 6 -or
+      [string]$Receipt.attestationKind -cne $script:BundledRuntimeAttestationKind -or
+      [string]$Receipt.aclProtectionKind -cne $script:RuntimeAttestationAclProtectionKind -or
+      [string]$Receipt.commitSha -cne $ExpectedSha -or
+      [string]$Receipt.releaseManifestSha256 -cne [string]$CriticalPayload.releaseManifestSha256 -or
+      [string]$Receipt.packageLockSha256 -cne [string]$CriticalPayload.packageLockSha256 -or
+      [string]$Receipt.bundlePath -cne $script:BundledRuntimePath -or
+      [string]$Receipt.bundleSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [uint64]$Receipt.bundleBytes -lt 1 -or
+      [string]$Receipt.bundleBuildReceiptSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [string]$Receipt.nodeVersion -cne "v$($script:PinnedNodeVersion)" -or
+      [string]$Receipt.nodeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [string]$Receipt.nodeRuntimeArchiveSha256 -cne $script:PinnedNodeArchiveSha256 -or
+      [int]$Receipt.nodeRuntimeFileCount -lt 1 -or
+      [string]$Receipt.nodeRuntimeTreeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [string]$Receipt.identitySid -cnotmatch "^S-1-[0-9-]+$") {
+    throw "Bundled runtime attestation receipt does not match the selected release."
+  }
+  $criticalKeys = @($script:BundledRuntimeCriticalPayloadPaths)
+  if ($Receipt.criticalPayloadSha256 -isnot [System.Collections.IDictionary] -or
+      @($Receipt.criticalPayloadSha256.Keys | Where-Object { $_ -notin $criticalKeys }).Count -ne 0 -or
+      @($criticalKeys | Where-Object { $_ -notin $Receipt.criticalPayloadSha256.Keys }).Count -ne 0) {
+    throw "Bundled runtime critical-payload contract drifted."
+  }
+  foreach ($criticalPath in $criticalKeys) {
+    if ([string]$Receipt.criticalPayloadSha256[$criticalPath] -cne
+        [string]$CriticalPayload.criticalPayloadSha256[$criticalPath]) {
+      throw "Bundled runtime critical payload drifted: $criticalPath"
+    }
+  }
+  $bundledRuntime = Read-BundledRuntimeBuildReceipt -ReleaseRoot $ReleaseRoot
+  if ([string]$Receipt.bundleSha256 -cne [string]$bundledRuntime.bundleSha256 -or
+      [uint64]$Receipt.bundleBytes -ne [uint64]$bundledRuntime.bundleBytes -or
+      [string]$Receipt.bundleBuildReceiptSha256 -cne
+        [string]$CriticalPayload.criticalPayloadSha256[$script:BundledRuntimeBuildReceiptPath]) {
+    throw "Bundled runtime build identity drifted after release installation."
+  }
+  $receiptSha256 = (Get-FileHash -LiteralPath $ReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if (-not [string]::IsNullOrWhiteSpace($ExpectedReceiptSha256) -and
+      ($ExpectedReceiptSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+       $receiptSha256 -cne $ExpectedReceiptSha256)) {
+    throw "Bundled runtime receipt does not match the release pointer."
+  }
+  $sealPath = Assert-ContainedPath `
+    -Root $Layout.RuntimeIntegrity `
+    -Path (Join-Path $Layout.RuntimeIntegrity "$ExpectedSha.json")
+  $seal = Read-JsonHashtable -Path $sealPath
+  $sealKeys = @(
+    "schemaVersion", "attestationKind", "aclProtectionKind", "commitSha",
+    "runtimeIntegritySha256", "bundleSha256", "bundleBuildReceiptSha256",
+    "releaseManifestSha256", "createdAtUtc"
+  )
+  if (@($seal.Keys | Where-Object { $_ -notin $sealKeys }).Count -ne 0 -or
+      @($sealKeys | Where-Object { $_ -notin $seal.Keys }).Count -ne 0 -or
+      [int]$seal.schemaVersion -ne 4 -or
+      [string]$seal.attestationKind -cne $script:BundledRuntimeAttestationKind -or
+      [string]$seal.aclProtectionKind -cne $script:RuntimeAttestationAclProtectionKind -or
+      [string]$seal.commitSha -cne $ExpectedSha -or
+      [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
+      [string]$seal.bundleSha256 -cne [string]$Receipt.bundleSha256 -or
+      [string]$seal.bundleBuildReceiptSha256 -cne [string]$Receipt.bundleBuildReceiptSha256 -or
+      [string]$seal.releaseManifestSha256 -cne [string]$CriticalPayload.releaseManifestSha256) {
+    throw "External bundled runtime seal does not match the immutable release receipt."
+  }
+  [void](Assert-UtcTimestamp -Value ([string]$seal.createdAtUtc) -Context "Bundled runtime seal createdAtUtc")
+  [void](Assert-IntegritySealProtection -Path $sealPath -IdentitySid ([string]$Receipt.identitySid))
+  $currentIdentity = Get-CurrentWindowsIdentityReceipt
+  if ([string]$Receipt.identitySid -cne [string]$currentIdentity.identitySid) {
+    throw "Bundled runtime was sealed by a different Windows identity."
+  }
+  $nodeRuntime = Read-PinnedNodeRuntimeAttestation -Layout $Layout
+  if (-not [string]::Equals(
+      [string]$Receipt.nodePath,
+      [string]$nodeRuntime.nodePath,
+      [System.StringComparison]::OrdinalIgnoreCase
+    ) -or
+      [string]$Receipt.nodeSha256 -cne [string]$nodeRuntime.nodeSha256 -or
+      [int]$Receipt.nodeRuntimeFileCount -ne [int]$nodeRuntime.payloadFileCount -or
+      [string]$Receipt.nodeRuntimeTreeSha256 -cne [string]$nodeRuntime.payloadTreeSha256) {
+    throw "Bundled runtime receipt is not bound to the qualified D-backed Node.js runtime."
+  }
+  $criticalPaths = @(Get-BundledRuntimeCriticalPaths -ReleaseRoot $ReleaseRoot)
+  [void](Assert-BoundedReleaseDirectoryProtection `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -IdentitySid ([string]$Receipt.identitySid) `
+      -CriticalPaths $criticalPaths `
+      -DescendantAclMode Explicit)
+  $Receipt["runtimeIntegritySha256"] = $receiptSha256
+  $Receipt["attestationMode"] = "sealed"
+  $Receipt["criticalPathCount"] = $criticalPaths.Count
+  return $Receipt
 }
 
 function Test-SealedRuntimeDependencyAttestation {
@@ -2071,14 +2437,29 @@ function Test-SealedRuntimeDependencyAttestation {
   )
 
   [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
+  $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
+  $receipt = Read-JsonHashtable -Path $receiptPath
   $criticalPayload = Get-CriticalReleasePayloadAttestation `
     -Layout $Layout `
     -ReleaseRoot $ReleaseRoot `
-    -ExpectedSha $ExpectedSha
+    -ExpectedSha $ExpectedSha `
+    -PayloadPaths $(if ([int]$receipt.schemaVersion -eq 6) {
+        $script:BundledRuntimeCriticalPayloadPaths
+      } else {
+        $script:CriticalReleasePayloadPaths
+      })
+  if ([int]$receipt.schemaVersion -eq 6) {
+    return (Test-SealedBundledRuntimeAttestation `
+        -Layout $Layout `
+        -ReleaseRoot $ReleaseRoot `
+        -ExpectedSha $ExpectedSha `
+        -CriticalPayload $criticalPayload `
+        -Receipt $receipt `
+        -ReceiptPath $receiptPath `
+        -ExpectedReceiptSha256 $ExpectedReceiptSha256)
+  }
   $packageLock = Read-JsonHashtable -Path (Join-Path $ReleaseRoot "package-lock.json")
   $workspaceLinks = Get-RuntimeWorkspaceLinkContract -ReleaseRoot $ReleaseRoot -PackageLock $packageLock
-  $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
-  $receipt = Read-JsonHashtable -Path $receiptPath
   $legacyReceipt = [int]$receipt.schemaVersion -eq 3
   $explicitAclReceipt = [int]$receipt.schemaVersion -eq 5
   if ($legacyReceipt) {
@@ -2276,10 +2657,30 @@ function Test-RuntimeDependencyIntegrityFullAudit {
   )
 
   $receipt = Test-SealedRuntimeDependencyAttestation `
-    -Layout $Layout `
-    -ReleaseRoot $ReleaseRoot `
-    -ExpectedSha $ExpectedSha `
-    -ExpectedReceiptSha256 $ExpectedReceiptSha256
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -ExpectedSha $ExpectedSha `
+      -ExpectedReceiptSha256 $ExpectedReceiptSha256
+  if ([int]$receipt.schemaVersion -eq 6) {
+    $manifest = Test-ReleaseDirectory `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -ExpectedSha $ExpectedSha
+    $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $Layout
+    if ([int]$receipt.nodeRuntimeFileCount -ne [int]$nodeRuntime.payloadFileCount -or
+        [string]$receipt.nodeRuntimeTreeSha256 -cne [string]$nodeRuntime.payloadTreeSha256) {
+      throw "Pinned Node.js runtime failed bundled-runtime full-file audit."
+    }
+    [void](Assert-ReleaseDirectoryProtection `
+        -Layout $Layout `
+        -ReleaseRoot $ReleaseRoot `
+        -IdentitySid ([string]$receipt.identitySid) `
+        -DescendantAclMode Explicit)
+    $receipt["attestationMode"] = "full-audit"
+    $receipt["fullAuditPayloadFileCount"] = [int]$manifest.payloadSha256.Count
+    $receipt["fullAuditBundleSha256"] = [string]$receipt.bundleSha256
+    return $receipt
+  }
   if (-not [string]::IsNullOrWhiteSpace($ExpectedTreeSha256) -and
       $ExpectedTreeSha256 -cnotmatch "^[0-9a-f]{64}$") {
     throw "Expected full-audit tree SHA-256 is invalid."
@@ -3780,6 +4181,33 @@ function Get-ReleaseRoot {
 
   [void](Assert-CommitSha -CommitSha $CommitSha)
   return (Assert-ContainedPath -Root $Layout.Releases -Path (Join-Path $Layout.Releases $CommitSha))
+}
+
+function Get-ReleaseServerEntrypoint {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$RuntimeReceipt
+  )
+
+  $schemaVersion = [int]$RuntimeReceipt.schemaVersion
+  $relativePath = if ($schemaVersion -eq 6) {
+    $script:BundledRuntimePath
+  } elseif ($schemaVersion -in @(3, 4, 5)) {
+    "apps/api/dist/server.js"
+  } else {
+    throw "Runtime receipt schema $schemaVersion has no reviewed server entrypoint."
+  }
+  $entrypoint = Assert-SafePayloadPath `
+    -RelativePath $relativePath `
+    -DestinationRoot ([System.IO.Path]::GetFullPath($ReleaseRoot))
+  if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
+    throw "Selected release is missing required server entrypoint $relativePath."
+  }
+  $item = Get-Item -LiteralPath $entrypoint -Force
+  if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Selected release server entrypoint cannot be a reparse point."
+  }
+  return $entrypoint
 }
 
 function New-ReleasePointer {
