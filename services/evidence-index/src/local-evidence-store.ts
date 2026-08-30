@@ -486,29 +486,101 @@ export class LocalEvidenceStore {
   }
 
   async listRecommendationDecisionEvents(
-    limit = DEFAULT_PORTFOLIO_ARTIFACT_LIMIT
+    limit = DEFAULT_PORTFOLIO_ARTIFACT_LIMIT,
+    recommendationIds?: readonly string[]
   ): Promise<RecommendationDecisionEvent[]> {
     assertListLimit(limit, "recommendation decision event");
     const ids = await this.#listRecordIds(
       ["recommendation-decision-events"],
       "recommendation decision event"
     );
-    const events = await Promise.all(
-      ids.map((eventId) => this.readRecommendationDecisionEvent(eventId))
+    const compareEvents = (
+      first: RecommendationDecisionEvent,
+      second: RecommendationDecisionEvent
+    ): number => {
+      const occurredOrder =
+        Date.parse(first.occurredAt) - Date.parse(second.occurredAt);
+      if (occurredOrder !== 0) {
+        return occurredOrder;
+      }
+      const sequenceOrder = first.sequence - second.sequence;
+      return sequenceOrder !== 0
+        ? sequenceOrder
+        : first.eventId.localeCompare(second.eventId);
+    };
+    const compareDecisionOrder = (
+      first: RecommendationDecisionEvent,
+      second: RecommendationDecisionEvent
+    ): number =>
+      first.sequence - second.sequence ||
+      first.eventId.localeCompare(second.eventId);
+    const retainNewest = (
+      retained: RecommendationDecisionEvent[],
+      event: RecommendationDecisionEvent,
+      compare: (
+        first: RecommendationDecisionEvent,
+        second: RecommendationDecisionEvent
+      ) => number
+    ): void => {
+      retained.push(event);
+      retained.sort((first, second) => compare(second, first));
+      if (retained.length > limit) {
+        retained.length = limit;
+      }
+    };
+
+    if (recommendationIds === undefined) {
+      const newest: RecommendationDecisionEvent[] = [];
+      for (const eventId of ids) {
+        retainNewest(
+          newest,
+          await this.readRecommendationDecisionEvent(eventId),
+          compareEvents
+        );
+      }
+      return newest.sort(compareEvents);
+    }
+
+    const parsedRecommendationIds = recommendationIds.map((recommendationId) =>
+      StableIdSchema.parse(recommendationId)
     );
-    return events
-      .sort((first, second) => {
-        const occurredOrder =
-          Date.parse(first.occurredAt) - Date.parse(second.occurredAt);
-        if (occurredOrder !== 0) {
-          return occurredOrder;
-        }
-        const sequenceOrder = first.sequence - second.sequence;
-        return sequenceOrder !== 0
-          ? sequenceOrder
-          : first.eventId.localeCompare(second.eventId);
-      })
-      .slice(0, limit);
+    if (
+      parsedRecommendationIds.length > limit ||
+      new Set(parsedRecommendationIds).size !== parsedRecommendationIds.length
+    ) {
+      throw new Error(
+        "recommendation decision event recovery IDs must be unique and cannot exceed the limit"
+      );
+    }
+    if (parsedRecommendationIds.length === 0) {
+      return [];
+    }
+    const requestedRecommendationIds = new Set(parsedRecommendationIds);
+    const latestByRecommendation = new Map<
+      string,
+      RecommendationDecisionEvent
+    >();
+    const newestCandidates: RecommendationDecisionEvent[] = [];
+    for (const eventId of ids) {
+      const event = await this.readRecommendationDecisionEvent(eventId);
+      if (!requestedRecommendationIds.has(event.recommendationId)) {
+        continue;
+      }
+      const latest = latestByRecommendation.get(event.recommendationId);
+      if (latest === undefined || compareDecisionOrder(event, latest) > 0) {
+        latestByRecommendation.set(event.recommendationId, event);
+      }
+      retainNewest(newestCandidates, event, compareDecisionOrder);
+    }
+
+    const selected = [...latestByRecommendation.values()];
+    const selectedIds = new Set(selected.map((event) => event.eventId));
+    selected.push(
+      ...newestCandidates
+        .filter((event) => !selectedIds.has(event.eventId))
+        .slice(0, limit - selected.length)
+    );
+    return selected.sort(compareEvents);
   }
 
   async putDashboardTemplateEvent(

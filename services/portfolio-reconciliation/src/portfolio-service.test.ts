@@ -1,9 +1,16 @@
-import { canonicalJson, sha256Hex } from "@unified-ai/evidence-index";
+import {
+  canonicalJson,
+  LocalEvidenceStore,
+  sha256Hex
+} from "@unified-ai/evidence-index";
 import type {
   PortfolioIngestionResult,
   RepositoryInventoryItem,
   RepositoryPortfolioSnapshot
 } from "@unified-ai/portfolio-ingestion";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import {
   PortfolioService,
@@ -269,6 +276,90 @@ describe("PortfolioService", () => {
     expect(recovered.listRuns()).toHaveLength(1);
     expect(recovered.listRepositories()).toHaveLength(1);
     expect(recovered.listRecommendations()[0]?.decisionHistory).toHaveLength(1);
+  });
+
+  test("recovers the newest override and advances its sequence after more than 100 events", async () => {
+    const temporaryRoot = await mkdtemp(
+      join(tmpdir(), "uao-portfolio-decision-recovery-")
+    );
+    const repositoryRoot = join(temporaryRoot, "repository");
+    await mkdir(repositoryRoot, { recursive: true });
+    const evidence = new LocalEvidenceStore({
+      root: join(repositoryRoot, ".local", "evidence"),
+      repositoryRoot
+    });
+    let clock = 0;
+    const now = (): Date =>
+      new Date(Date.parse(CAPTURED_AT) + clock++ * 1_000);
+
+    try {
+      const first = new PortfolioService({
+        owner: "fixture-owner",
+        orchestratorFullName: "fixture-owner/unified-ai-orchestrator",
+        ingestor: { ingestOwnedPortfolio: vi.fn(async () => ingestion()) },
+        evidence,
+        classifier: agreeingClassifier,
+        now,
+        runId: () => "portfolio-run-bounded-decision-recovery"
+      });
+      first.startRun();
+      await first.waitForRun("portfolio-run-bounded-decision-recovery");
+      const recommendationId =
+        first.listRecommendations()[0]?.recommendationId;
+      if (recommendationId === undefined) {
+        throw new Error("fixture recommendation missing");
+      }
+
+      for (let sequence = 1; sequence <= 101; sequence += 1) {
+        await first.overrideRecommendation({
+          recommendationId,
+          action:
+            sequence % 2 === 1 ? "archive-candidate" : "keep-standalone",
+          reasonCode: "strategic-priority",
+          explanation: `Synthetic bounded recovery override ${String(sequence)}.`,
+          providedBy: "operator-yashu"
+        });
+      }
+
+      const recovered = new PortfolioService({
+        owner: "fixture-owner",
+        orchestratorFullName: "fixture-owner/unified-ai-orchestrator",
+        ingestor: { ingestOwnedPortfolio: vi.fn(async () => ingestion()) },
+        evidence,
+        now
+      });
+      await recovered.initialize();
+
+      const latest = recovered.listRecommendations()[0];
+      expect(latest).toMatchObject({
+        recommendationId,
+        action: "archive-candidate",
+        lifecycle: "overridden"
+      });
+      expect(latest?.decisionHistory).toHaveLength(100);
+      expect(latest?.decisionHistory[0]?.sequence).toBe(2);
+      expect(latest?.decisionHistory.at(-1)?.sequence).toBe(101);
+
+      const next = await recovered.overrideRecommendation({
+        recommendationId,
+        action: "keep-standalone",
+        reasonCode: "strategic-priority",
+        explanation: "Prove recovery allocates the next unused sequence.",
+        providedBy: "operator-yashu"
+      });
+      expect(next.decisionHistory.at(-1)).toMatchObject({
+        eventId: `decision-${recommendationId}-102`,
+        sequence: 102,
+        action: "keep-standalone"
+      });
+      await expect(
+        evidence.readRecommendationDecisionEvent(
+          `decision-${recommendationId}-102`
+        )
+      ).resolves.toMatchObject({ sequence: 102 });
+    } finally {
+      await rm(temporaryRoot, { force: true, recursive: true });
+    }
   });
 
   test("treats imported chat as non-authoritative intent on the next run", async () => {

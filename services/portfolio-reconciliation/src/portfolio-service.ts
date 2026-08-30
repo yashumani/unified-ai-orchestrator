@@ -64,7 +64,8 @@ export interface PortfolioEvidencePort {
     event: RecommendationDecisionEvent
   ): Promise<{ sha256: string; relativePath: string }>;
   listRecommendationDecisionEvents(
-    limit?: number
+    limit?: number,
+    recommendationIds?: readonly string[]
   ): Promise<RecommendationDecisionEvent[]>;
 }
 
@@ -370,6 +371,22 @@ function recommendationProjection(
   };
 }
 
+function nextDecisionSequence(
+  events: readonly RecommendationDecisionEvent[]
+): number {
+  const latestSequence = events.reduce(
+    (latest, event) => Math.max(latest, event.sequence),
+    0
+  );
+  if (
+    !Number.isSafeInteger(latestSequence) ||
+    latestSequence >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error("Portfolio recommendation decision sequence is exhausted.");
+  }
+  return latestSequence + 1;
+}
+
 function matchingInventory(
   inventory: readonly RepositoryInventoryItem[],
   snapshot: RepositoryPortfolioSnapshot
@@ -447,10 +464,7 @@ export class PortfolioService {
   }
 
   async initialize(): Promise<void> {
-    const [runs, events] = await Promise.all([
-      this.#evidence.listPortfolioRuns(20),
-      this.#evidence.listRecommendationDecisionEvents(100)
-    ]);
+    const runs = await this.#evidence.listPortfolioRuns(20);
     for (const run of runs.reverse()) {
       try {
         const aggregate = persistedPortfolioAggregateSchema.parse(
@@ -471,6 +485,12 @@ export class PortfolioService {
         ) {
           throw new Error("stored portfolio aggregate failed run identity binding");
         }
+        const events = await this.#evidence.listRecommendationDecisionEvents(
+          100,
+          aggregate.recommendations.map(
+            (stored) => stored.recommendation.recommendationId
+          )
+        );
         const recommendations = aggregate.recommendations.map((stored) => {
           const history = events
             .filter(
@@ -702,6 +722,7 @@ export class PortfolioService {
     const reasonCode = UserOverrideReasonCodeSchema.parse(input.reasonCode);
     const providedBy = StableIdSchema.parse(input.providedBy);
     const occurredAt = this.#now().toISOString();
+    const sequence = nextDecisionSequence(stored.events);
     const receipt = await this.#evidence.putObject({
       schemaVersion: SCHEMA_VERSION,
       kind: "portfolio-recommendation-override-receipt",
@@ -717,10 +738,10 @@ export class PortfolioService {
     });
     const event = RecommendationDecisionEventSchema.parse({
       schemaVersion: SCHEMA_VERSION,
-      eventId: `decision-${recommendationId}-${stored.events.length + 1}`,
+      eventId: `decision-${recommendationId}-${sequence}`,
       recommendationId,
       runId: stored.recommendation.runId,
-      sequence: stored.events.length + 1,
+      sequence,
       actor: "user",
       previousLifecycle: stored.currentLifecycle,
       previousAction: stored.currentAction,

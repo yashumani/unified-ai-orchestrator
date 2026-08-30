@@ -214,6 +214,7 @@ export async function searchRepository(
   });
   const needle = options.caseSensitive === true ? query : query.toLocaleLowerCase("en-US");
   const matches: SearchMatch[] = [];
+  let truncated = inventory.truncated;
 
   for (const path of inventory.files) {
     throwIfAborted(options.signal);
@@ -229,6 +230,9 @@ export async function searchRepository(
       }
       continue;
     }
+    if (result.truncated) {
+      truncated = true;
+    }
     for (const [index, line] of result.content.split("\n").entries()) {
       const haystack = options.caseSensitive === true ? line : line.toLocaleLowerCase("en-US");
       if (haystack.includes(needle)) {
@@ -240,7 +244,7 @@ export async function searchRepository(
     }
   }
 
-  return { matches, truncated: inventory.truncated };
+  return { matches, truncated };
 }
 
 export interface GitStatusResult {

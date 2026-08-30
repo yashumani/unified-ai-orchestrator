@@ -652,6 +652,50 @@ describe("local evidence store", () => {
     ).rejects.toThrow(/immutable/u);
   });
 
+  it("selects each requested recommendation's latest validated event without relying on event ID shape", async () => {
+    const { store } = await makeStore();
+    const events = [
+      makeRecommendationDecisionEvent("opaque-alpha-first", 1),
+      makeRecommendationDecisionEvent("unrelated-valid-alpha-token", 9),
+      makeRecommendationDecisionEvent("opaque-beta-first", 2, {
+        recommendationId: "recommendation-beta"
+      }),
+      makeRecommendationDecisionEvent("another-valid-beta-token", 5, {
+        recommendationId: "recommendation-beta"
+      }),
+      makeRecommendationDecisionEvent("unrequested-gamma-token", 100, {
+        recommendationId: "recommendation-gamma"
+      })
+    ];
+    for (const event of events) {
+      await store.putRecommendationDecisionEvent(event);
+    }
+
+    const recovered = await store.listRecommendationDecisionEvents(2, [
+      "recommendation-alpha",
+      "recommendation-beta"
+    ]);
+
+    expect(recovered).toHaveLength(2);
+    expect(
+      Object.fromEntries(
+        recovered.map((event) => [
+          event.recommendationId,
+          { eventId: event.eventId, sequence: event.sequence }
+        ])
+      )
+    ).toEqual({
+      "recommendation-alpha": {
+        eventId: "unrelated-valid-alpha-token",
+        sequence: 9
+      },
+      "recommendation-beta": {
+        eventId: "another-valid-beta-token",
+        sequence: 5
+      }
+    });
+  });
+
   it("rejects invalid decision event IDs and enforces event list bounds", async () => {
     const { store } = await makeStore();
 

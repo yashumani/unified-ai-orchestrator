@@ -149,7 +149,74 @@ describe("fixture dashboard adapter", () => {
       (projection) => projection.type === "filter"
     );
     expect(filter?.type === "filter" ? filter.options : []).toEqual([
-      { value: "North", label: "North", count: 2, selected: true }
+      { value: "East", label: "East", count: 2, selected: false },
+      { value: "North", label: "North", count: 2, selected: true },
+      { value: "South", label: "South", count: 2, selected: false },
+      { value: "West", label: "West", count: 2, selected: false }
+    ]);
+  });
+
+  it("keeps other channel options available so an active selection can expand", async () => {
+    const northDirect = await adapter().preview(
+      request({
+        filters: [
+          { bindingId: "region", operator: "equals", value: "North" },
+          { bindingId: "channel", operator: "in", value: ["Direct"] }
+        ]
+      })
+    );
+    const directFilter = northDirect.projections.find(
+      (projection) => projection.type === "filter"
+    );
+    const directKpi = northDirect.projections.find(
+      (projection) => projection.type === "kpi"
+    );
+    const directTable = northDirect.projections.find(
+      (projection) => projection.type === "data-table"
+    );
+    const directBar = northDirect.projections.find(
+      (projection) => projection.type === "bar-chart"
+    );
+
+    expect(directFilter?.type === "filter" ? directFilter.options : []).toEqual([
+      { value: "Direct", label: "Direct", count: 1, selected: true },
+      { value: "Online", label: "Online", count: 1, selected: false }
+    ]);
+    expect(directKpi?.type === "kpi" ? directKpi.value : null).toBe(12_800);
+    expect(directTable?.type === "data-table" ? directTable.totalRows : null).toBe(1);
+    expect(directBar?.type === "bar-chart" ? directBar.series[0]?.points : []).toEqual([
+      expect.objectContaining({ dimension: "North", value: 12_800 })
+    ]);
+
+    const northDirectAndOnline = await adapter().preview(
+      request({
+        filters: [
+          { bindingId: "region", operator: "equals", value: "North" },
+          { bindingId: "channel", operator: "in", value: ["Direct", "Online"] }
+        ]
+      })
+    );
+    const expandedFilter = northDirectAndOnline.projections.find(
+      (projection) => projection.type === "filter"
+    );
+    const expandedKpi = northDirectAndOnline.projections.find(
+      (projection) => projection.type === "kpi"
+    );
+    const expandedTable = northDirectAndOnline.projections.find(
+      (projection) => projection.type === "data-table"
+    );
+    const expandedBar = northDirectAndOnline.projections.find(
+      (projection) => projection.type === "bar-chart"
+    );
+
+    expect(expandedFilter?.type === "filter" ? expandedFilter.options : []).toEqual([
+      { value: "Direct", label: "Direct", count: 1, selected: true },
+      { value: "Online", label: "Online", count: 1, selected: true }
+    ]);
+    expect(expandedKpi?.type === "kpi" ? expandedKpi.value : null).toBe(29_200);
+    expect(expandedTable?.type === "data-table" ? expandedTable.totalRows : null).toBe(2);
+    expect(expandedBar?.type === "bar-chart" ? expandedBar.series[0]?.points : []).toEqual([
+      expect.objectContaining({ dimension: "North", value: 29_200 })
     ]);
   });
 

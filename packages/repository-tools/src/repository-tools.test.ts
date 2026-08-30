@@ -140,6 +140,17 @@ describe("repository reads and writes", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("marks search results incomplete when a tracked file exceeds the searched line window", async () => {
+    const root = await fixtureRepository();
+    const lines = Array.from({ length: 1_001 }, (_, index) =>
+      index === 1_000 ? "only-beyond-search-window" : `public line ${index + 1}`
+    );
+    await writeFile(join(root, "README.md"), `${lines.join("\n")}\n`, "utf8");
+
+    const result = await searchRepository(root, "only-beyond-search-window");
+    expect(result).toEqual({ matches: [], truncated: true });
+  });
+
   it("returns staged and unstaged public diffs", async () => {
     const root = await fixtureRepository();
     await writeFile(join(root, "README.md"), "staged change\n", "utf8");

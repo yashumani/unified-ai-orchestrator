@@ -304,15 +304,21 @@ export class FixtureDashboardAdapter implements DashboardDataAdapter {
       sourceIndex
     }));
 
-    const filteredRows = indexedRows.filter(({ row }) =>
+    const rowMatchesActiveFilters = (
+      row: DashboardCalculationRow,
+      excludedBindingId?: string
+    ): boolean =>
       request.filters.every((filter) => {
+        if (filter.bindingId === excludedBindingId) {
+          return true;
+        }
         const binding = bindings.get(filter.bindingId);
         if (binding === undefined) {
           return false;
         }
         return matchesFilter(bindingValue(binding, row), filter);
-      })
-    );
+      });
+    const filteredRows = indexedRows.filter(({ row }) => rowMatchesActiveFilters(row));
 
     const valueForSource = (
       source: DashboardValueSource,
@@ -583,12 +589,15 @@ export class FixtureDashboardAdapter implements DashboardDataAdapter {
 
       if (component.type === "filter") {
         const binding = bindings.get(component.bindingId);
+        const optionRows = indexedRows.filter(({ row }) =>
+          rowMatchesActiveFilters(row, component.bindingId)
+        );
         const options = new Map<
           string,
           { value: DashboardPrimitive; count: number; sourceIndex: number }
         >();
         if (binding !== undefined) {
-          for (const [sourceIndex, indexed] of sortedRows.entries()) {
+          for (const indexed of optionRows) {
             const value = bindingValue(binding, indexed.row);
             if (value === null && binding.nullHandling === "exclude") {
               continue;
@@ -596,7 +605,7 @@ export class FixtureDashboardAdapter implements DashboardDataAdapter {
             const key = canonicalJson([typeof value, value]);
             const existing = options.get(key);
             if (existing === undefined) {
-              options.set(key, { value, count: 1, sourceIndex });
+              options.set(key, { value, count: 1, sourceIndex: indexed.sourceIndex });
             } else {
               existing.count += 1;
             }
