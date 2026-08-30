@@ -7,7 +7,7 @@ param(
   [string]$RepositoryRoot = "D:\Yashu-AI-Workspace\unified-ai-orchestrator",
   [string]$HealthUri = "http://127.0.0.1:8790/api/ready",
   [string]$TaskName = "UnifiedAIOrchestrator-Local",
-  [ValidateRange(1, 60)][int]$HealthTimeoutSeconds = 45
+  [ValidateRange(1, 300)][int]$HealthTimeoutSeconds = 180
 )
 
 . (Join-Path $PSScriptRoot "Deployment.Common.ps1")
@@ -35,6 +35,7 @@ if (-not $PSCmdlet.ShouldProcess(
     branch = $sourceReceipt.branch
     taskName = $TaskName
     releaseRoot = $releaseRoot
+    nodeRuntimeRoot = $layout.NodeRuntimeRoot
     payloadFiles = $manifest.payloadSha256.Count
   } | ConvertTo-Json -Depth 10
   return
@@ -42,42 +43,80 @@ if (-not $PSCmdlet.ShouldProcess(
 
 Initialize-DeploymentLayout -Layout $layout
 $transaction = Enter-DeploymentTransactionMutex
+if ([bool]$transaction.WasAbandoned) {
+  Assert-NoDeploymentReparsePoints -Layout $layout
+  Write-DeploymentEvent -Layout $layout -Action "lock-recovery" -Status "info" -Message "Recovered an abandoned deployment transaction mutex after revalidating deployment paths."
+}
 $operationId = Get-OperationId
 $stagingRoot = Assert-ContainedPath -Root $layout.Staging -Path (Join-Path $layout.Staging "$ExpectedSha-$operationId")
 $oldPointer = $null
 $activationStarted = $false
+$activationCommitted = $false
 $pendingWritten = $false
+$releaseInstallPendingWritten = $false
 try {
+  [void](Assert-DeploymentSource -RepositoryRoot $RepositoryRoot -ExpectedSha $ExpectedSha)
+  [void](Recover-InterruptedDeploymentActivation `
+      -Layout $layout `
+      -RepositoryRoot $RepositoryRoot `
+      -TaskName $TaskName `
+      -HealthUri $HealthUri `
+      -HealthTimeoutSeconds $HealthTimeoutSeconds)
+  [void](Recover-InterruptedReleaseInstallation -Layout $layout)
+  Assert-NoForeignDeploymentPendingRecords -Layout $layout
   # Repeat every drift-prone preflight after acquiring the cross-session lock.
   [void](Assert-DeploymentSource -RepositoryRoot $RepositoryRoot -ExpectedSha $ExpectedSha)
   [void](Test-ReleaseArchive -ArtifactPath $ArtifactPath -ExpectedSha $ExpectedSha)
   [void](Assert-DeploymentTaskRegistration -RepositoryRoot $RepositoryRoot -TaskName $TaskName)
+  $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $layout -ExecuteVersionChecks
   Write-DeploymentEvent -Layout $layout -Action "deploy" -Status "started" -CommitSha $ExpectedSha -OperationId $operationId -Message "Validated exact-SHA release artifact and canonical main source."
 
   if (Test-Path -LiteralPath $releaseRoot -PathType Container) {
     [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
+    $runtimeReceipt = Test-RuntimeDependencyIntegrity -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha
+    [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
   } else {
+    Write-AtomicJson -Layout $layout -Path $layout.ReleaseInstallationPending -Value ([ordered]@{
+        schemaVersion = 1
+        commitSha = $ExpectedSha
+        operationId = $operationId
+        createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+        state = "installing"
+        artifactSha256 = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        releaseRoot = $releaseRoot
+        stagingRoot = $stagingRoot
+      })
+    $releaseInstallPendingWritten = $true
     [void](New-Item -ItemType Directory -Path $stagingRoot)
     try {
       Expand-ValidatedReleaseArchive -ArtifactPath $ArtifactPath -DestinationRoot $stagingRoot
       [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $stagingRoot -ExpectedSha $ExpectedSha)
-      $nodePath = Get-StableExecutable -Name "node.exe"
-      [void](Assert-NodeRuntime -NodePath $nodePath)
-      $npmPath = Get-StableExecutable -Name "npm.cmd"
-      Push-Location $stagingRoot
+      Move-Item -LiteralPath $stagingRoot -Destination $releaseRoot
+      $nodePath = [string]$nodeRuntime.nodePath
+      $npmPath = [string]$nodeRuntime.npmPath
+      Push-Location $releaseRoot
       try {
-        & $npmPath ci --omit=dev --ignore-scripts --no-audit --no-fund
+        & $npmPath ci --omit=dev --ignore-scripts --no-audit --no-fund --prefer-offline
         if ($LASTEXITCODE -ne 0) {
           throw "npm ci failed with exit code $LASTEXITCODE."
         }
       } finally {
         Pop-Location
       }
-      if (-not (Test-Path -LiteralPath (Join-Path $stagingRoot "node_modules") -PathType Container)) {
+      if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot "node_modules") -PathType Container)) {
         throw "npm ci did not produce the release node_modules directory."
       }
-      [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $stagingRoot -ExpectedSha $ExpectedSha)
-      Move-Item -LiteralPath $stagingRoot -Destination $releaseRoot
+      [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
+      $runtimeReceipt = Write-RuntimeDependencyIntegrity `
+        -Layout $layout `
+        -ReleaseRoot $releaseRoot `
+        -ExpectedSha $ExpectedSha `
+        -NodePath $nodePath `
+        -NpmPath $npmPath
+      [void](Test-RuntimeDependencyIntegrity -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
+      Protect-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid)
+      Remove-Item -LiteralPath $layout.ReleaseInstallationPending -Force
+      $releaseInstallPendingWritten = $false
     } finally {
       if (Test-Path -LiteralPath $stagingRoot) {
         [void](Assert-ContainedPath -Root $layout.Staging -Path $stagingRoot)
@@ -90,17 +129,27 @@ try {
     $oldPointer = Read-ReleasePointer -Path $layout.Current
     $oldReleaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha ([string]$oldPointer.commitSha)
     [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $oldReleaseRoot -ExpectedSha ([string]$oldPointer.commitSha))
+    $oldRuntimeReceipt = Test-RuntimeDependencyIntegrity `
+      -Layout $layout `
+      -ReleaseRoot $oldReleaseRoot `
+      -ExpectedSha ([string]$oldPointer.commitSha) `
+      -ExpectedReceiptSha256 ([string]$oldPointer.runtimeDependencyReceiptSha256)
+    [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $oldReleaseRoot -IdentitySid ([string]$oldRuntimeReceipt.identitySid))
   }
   if (Test-Path -LiteralPath $layout.Pending -PathType Leaf) {
     throw "An unresolved pending deployment record exists; inspect and recover it before another activation."
   }
-  [void](Backup-DeploymentState -Layout $layout -OperationId $operationId)
+  $backupRoot = Backup-DeploymentState -Layout $layout -OperationId $operationId
+  $backupManifestSha256 = (Get-FileHash -LiteralPath (Join-Path $backupRoot "backup.json") -Algorithm SHA256).Hash.ToLowerInvariant()
   Write-AtomicJson -Layout $layout -Path $layout.Pending -Value ([ordered]@{
-      schemaVersion = 1
+      schemaVersion = 2
+      action = "deploy"
       commitSha = $ExpectedSha
       operationId = $operationId
       createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
       state = "activating"
+      backupRoot = $backupRoot
+      backupManifestSha256 = $backupManifestSha256
     })
   $pendingWritten = $true
 
@@ -109,7 +158,10 @@ try {
     -RepositoryRoot $RepositoryRoot `
     -TaskName $TaskName `
     -Confirm:$false
-  Write-AtomicJson -Layout $layout -Path $layout.Current -Value (New-ReleasePointer -CommitSha $ExpectedSha -Reason "deploy:$operationId")
+  Write-AtomicJson -Layout $layout -Path $layout.Current -Value (New-ReleasePointer `
+      -CommitSha $ExpectedSha `
+      -Reason "deploy:$operationId" `
+      -RuntimeDependencyReceiptSha256 ([string]$runtimeReceipt.runtimeIntegritySha256))
   Start-ScheduledTask -TaskName $TaskName
   [void](Wait-ForReleaseHealth -HealthUri $HealthUri -ExpectedSha $ExpectedSha -TimeoutSeconds $HealthTimeoutSeconds)
   [void](Test-ReleaseWebDocument -ReleaseRoot $releaseRoot -TimeoutSeconds 10)
@@ -121,10 +173,42 @@ try {
   if ($null -ne $oldPointer -and [string]$oldPointer.commitSha -cne $ExpectedSha) {
     Write-AtomicJson -Layout $layout -Path $layout.Previous -Value $oldPointer
   }
+  $recoveryController = Set-LastKnownGoodRecoveryController `
+    -Layout $layout `
+    -RepositoryRoot $RepositoryRoot `
+    -QualifiedReleaseSha $ExpectedSha `
+    -TaskName $TaskName
+  $controllerRoot = [string]$recoveryController.controllerRoot
+  $releaseAcceptanceOutput = & (Join-Path $controllerRoot "Test-LocalRelease.ps1") `
+    -RepositoryRoot $RepositoryRoot `
+    -ExpectedSha $ExpectedSha `
+    -RequireRepositoryHeadMatch `
+    -HealthUri $HealthUri `
+    -HealthTimeoutSeconds $HealthTimeoutSeconds `
+    -TaskName $TaskName
+  $releaseAcceptance = ($releaseAcceptanceOutput -join "`n") | ConvertFrom-Json -AsHashtable
+  if (-not [bool]$releaseAcceptance.accepted -or [string]$releaseAcceptance.commitSha -cne $ExpectedSha) {
+    throw "Full local-release acceptance did not attest the activated exact SHA."
+  }
+  $aiAcceptanceOutput = & (Join-Path $controllerRoot "Test-LocalAiRuntime.ps1") `
+    -RepositoryRoot $RepositoryRoot `
+    -TimeoutSeconds $HealthTimeoutSeconds
+  $aiAcceptance = ($aiAcceptanceOutput -join "`n") | ConvertFrom-Json -AsHashtable
+  if (-not [bool]$aiAcceptance.accepted -or
+      [string]$aiAcceptance.model -cne "qwen3:4b" -or
+      [string]$aiAcceptance.ollamaPhase -cne "ready" -or
+      [string]$aiAcceptance.whiteShadowPhase -cne "ready") {
+    throw "Full local-AI acceptance did not attest both governed backends."
+  }
   if (Test-Path -LiteralPath $layout.Pending -PathType Leaf) {
     Remove-Item -LiteralPath $layout.Pending -Force
   }
-  Write-DeploymentEvent -Layout $layout -Action "deploy" -Status "succeeded" -CommitSha $ExpectedSha -OperationId $operationId -Message "Exact release process, readiness SHA, evidence readiness, and web document passed."
+  $activationCommitted = $true
+  try {
+    Write-DeploymentEvent -Layout $layout -Action "deploy" -Status "succeeded" -CommitSha $ExpectedSha -OperationId $operationId -Message "Exact release process, readiness SHA, evidence readiness, and web document passed."
+  } catch {
+    Write-Warning "Deployment committed but success-event logging failed: $($_.Exception.Message)"
+  }
   [ordered]@{
     deployed = $true
     commitSha = $ExpectedSha
@@ -134,29 +218,37 @@ try {
     healthUri = $HealthUri
     readinessUri = $script:CanonicalReadyUri
     previousSha = if ($null -eq $oldPointer) { $null } else { [string]$oldPointer.commitSha }
+    recoveryControllerVersion = [string]$recoveryController.controllerVersion
+    recoveryControllerManifestSha256 = [string]$recoveryController.controllerManifestSha256
+    localReleaseAccepted = [bool]$releaseAcceptance.accepted
+    ollamaPhase = [string]$aiAcceptance.ollamaPhase
+    whiteShadowPhase = [string]$aiAcceptance.whiteShadowPhase
     operationId = $operationId
   } | ConvertTo-Json -Depth 10
 } catch {
   $failure = $_.Exception.Message
+  if ($releaseInstallPendingWritten -or (Test-Path -LiteralPath $layout.ReleaseInstallationPending -PathType Leaf)) {
+    try {
+      $installRecovery = Recover-InterruptedReleaseInstallation -Layout $layout
+      $failure = "$failure Interrupted release installation recovery completed for $([string]$installRecovery.commitSha)."
+    } catch {
+      $failure = "$failure Incomplete-release quarantine also failed: $($_.Exception.Message)"
+    }
+  }
   try {
     Write-DeploymentEvent -Layout $layout -Action "deploy" -Status "failed" -CommitSha $ExpectedSha -OperationId $operationId -Message $failure
   } catch {
     $failure = "$failure Deployment failure logging also failed."
   }
   $recoverySucceeded = -not $activationStarted
-  if ($activationStarted) {
+  if ($activationStarted -and -not $activationCommitted) {
     try {
-      & (Join-Path $PSScriptRoot "Stop-LocalRelease.ps1") `
-        -RepositoryRoot $RepositoryRoot `
-        -TaskName $TaskName `
-        -Confirm:$false
-      if ($null -ne $oldPointer) {
-        Write-AtomicJson -Layout $layout -Path $layout.Current -Value $oldPointer
-        Start-ScheduledTask -TaskName $TaskName
-        [void](Wait-ForReleaseHealth -HealthUri $HealthUri -ExpectedSha ([string]$oldPointer.commitSha) -TimeoutSeconds $HealthTimeoutSeconds)
-      } elseif (Test-Path -LiteralPath $layout.Current -PathType Leaf) {
-        Remove-Item -LiteralPath $layout.Current -Force
-      }
+      [void](Recover-InterruptedDeploymentActivation `
+          -Layout $layout `
+          -RepositoryRoot $RepositoryRoot `
+          -TaskName $TaskName `
+          -HealthUri $HealthUri `
+          -HealthTimeoutSeconds $HealthTimeoutSeconds)
       $recoverySucceeded = $true
     } catch {
       $failure = "$failure Rollback-on-failure also failed: $($_.Exception.Message)"

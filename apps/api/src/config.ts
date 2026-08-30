@@ -25,6 +25,7 @@ export interface OrchestratorConfig {
   port: number;
   releaseSha?: string;
   repositoryRoot: string;
+  releasePayloadRoot: string;
   evidenceRoot: string;
   trustGrantRelativePath: string;
   ollamaBaseUrl: string;
@@ -145,6 +146,23 @@ function assertReleaseWebDistPair(releaseSha: string, webDistRoot: string): void
   }
 }
 
+function releasePayloadPath(releaseSha: string): string {
+  return releaseSha === "development"
+    ? CANONICAL_REPOSITORY_ROOT
+    : win32.resolve(CANONICAL_DEPLOYMENT_RELEASES_ROOT, releaseSha);
+}
+
+function assertReleasePayloadPair(
+  releaseSha: string,
+  releasePayloadRoot: string
+): void {
+  if (pathKey(releasePayloadRoot) !== pathKey(releasePayloadPath(releaseSha))) {
+    throw new Error(
+      "ORCHESTRATOR_RELEASE_SHA and releasePayloadRoot must identify the same immutable application payload."
+    );
+  }
+}
+
 function loopbackHttpUrl(value: string, key: string): string {
   let url: URL;
   try {
@@ -246,11 +264,13 @@ export function readConfig(
     )
   );
   assertReleaseWebDistPair(releaseSha, webDistRoot);
+  const releasePayloadRoot = releasePayloadPath(releaseSha);
   return {
     host: parseHost(optionalString(environment, "ORCHESTRATOR_HOST", "127.0.0.1")),
     port: parsePort(optionalString(environment, "ORCHESTRATOR_PORT", "8790")),
     releaseSha,
     repositoryRoot,
+    releasePayloadRoot,
     evidenceRoot,
     trustGrantRelativePath: `${trustRoot}/workspace-grant.json`,
     ollamaBaseUrl: (() => {
@@ -321,6 +341,10 @@ export function assertCanonicalConfigPaths(config: OrchestratorConfig): void {
   );
   const webDistRoot = deploymentWebDistPath(config.webDistRoot);
   assertReleaseWebDistPair(config.releaseSha ?? "development", webDistRoot);
+  assertReleasePayloadPair(
+    config.releaseSha ?? "development",
+    config.releasePayloadRoot
+  );
   if (
     config.ollamaBaseUrl !== PINNED_OLLAMA_URL ||
     config.whiteshadowBaseUrl !== PINNED_WHITESHADOW_URL
@@ -358,6 +382,29 @@ export async function validateCanonicalRuntimePaths(
     "web",
     "dist"
   );
+  if ((config.releaseSha ?? "development") !== "development") {
+    const relativePayloadPath = win32.relative(
+      CANONICAL_REPOSITORY_ROOT,
+      config.releasePayloadRoot
+    );
+    let currentPayloadPath = CANONICAL_REPOSITORY_ROOT;
+    for (const segment of relativePayloadPath.split(/[\\/]/u)) {
+      currentPayloadPath = win32.resolve(currentPayloadPath, segment);
+      const status = await lstat(currentPayloadPath);
+      if (status.isSymbolicLink()) {
+        throw new Error(
+          "deployment application payload cannot traverse a symbolic link or junction"
+        );
+      }
+    }
+    const canonicalPayloadRoot = await realpath(config.releasePayloadRoot);
+    if (
+      pathKey(canonicalPayloadRoot) !== pathKey(config.releasePayloadRoot) ||
+      !(await lstat(canonicalPayloadRoot)).isDirectory()
+    ) {
+      throw new Error("deployment application payload must be its exact release directory");
+    }
+  }
   if (pathKey(config.webDistRoot) !== pathKey(developmentWebDist)) {
     const relativePath = win32.relative(CANONICAL_REPOSITORY_ROOT, config.webDistRoot);
     let current = CANONICAL_REPOSITORY_ROOT;

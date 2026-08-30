@@ -139,7 +139,7 @@ export async function createApp(options: CreateAppOptions): Promise<Express> {
   app.use("/api", createApiRouter(services));
   if (options.mountCopilotRuntime !== false) {
     const { createCopilotHandler } = await import("./copilot/runtime.js");
-    app.use(await createCopilotHandler(options.config));
+    app.use("/api/copilotkit", await createCopilotHandler(options.config));
   }
 
   if (options.serveWeb !== false) {

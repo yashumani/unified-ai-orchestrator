@@ -143,9 +143,7 @@ function Ensure-GitHubRunnerTask {
   $taskName = [string]$Installation.taskName
   $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   if ($null -eq $existing) {
-    $startScript = Join-Path $RepositoryRoot "scripts\deployment\Start-GitHubRunner.ps1"
-    $arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File `"$startScript`" -RepositoryRoot `"$RepositoryRoot`""
-    $action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument ([string]$Installation.arguments)
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $IdentityName
     $principal = New-ScheduledTaskPrincipal -UserId $IdentityName -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet `
@@ -162,7 +160,7 @@ function Ensure-GitHubRunnerTask {
       -Trigger $trigger `
       -Principal $principal `
       -Settings $settings `
-      -Description "Pinned repository-scoped GitHub Actions runner for Unified AI Orchestrator local production."
+      -Description $script:CanonicalRunnerTaskDescription
     Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
   }
   return (Assert-GitHubRunnerTaskRegistration `
@@ -182,9 +180,10 @@ if (-not (Test-Path -LiteralPath $startScript -PathType Leaf)) {
   throw "GitHub runner launcher does not exist: $startScript"
 }
 $powerShellPath = Get-StableExecutable -Name "pwsh.exe"
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$identityName = $identity.Name
-$identitySid = $identity.User.Value
+$identity = Get-CurrentWindowsIdentityReceipt
+$identityName = [string]$identity.identityName
+$identitySid = [string]$identity.identitySid
+$runnerArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File `"$startScript`" -RepositoryRoot `"$RepositoryRoot`""
 
 $existingState = if (Test-Path -LiteralPath $layout.RunnerInstallation -PathType Leaf) {
   Read-GitHubRunnerInstallation -Layout $layout
@@ -198,7 +197,10 @@ if ($null -ne $existingState -and [bool]$existingState.configured) {
   if ([string]$existingState.runnerName -cne $RunnerName) {
     throw "The installed runner name differs from RunnerName; remove it before changing identity."
   }
-  [void](Assert-PinnedRunnerBinary -Layout $layout)
+  [void](Assert-PinnedRunnerBinary `
+      -Layout $layout `
+      -ExpectedFileCount ([int]$existingState.payloadFileCount) `
+      -ExpectedTreeSha256 ([string]$existingState.payloadTreeSha256))
   $task = Ensure-GitHubRunnerTask `
     -RepositoryRoot $RepositoryRoot `
     -Layout $layout `
@@ -273,14 +275,14 @@ if (-not (Test-Path -LiteralPath $layout.RunnerRoot -PathType Container)) {
     throw
   }
 }
-[void](Assert-PinnedRunnerBinary -Layout $layout)
+$runnerPayload = Assert-PinnedRunnerBinary -Layout $layout
 
 $unexpectedTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -ne $unexpectedTask) {
   throw "A scheduled task named $TaskName already exists without matching installation state; refusing to configure a remote runner."
 }
 
-$aclOutput = & icacls.exe $layout.RunnerRoot /inheritance:r /grant:r "*$($identitySid):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" 2>&1
+$aclOutput = & $script:CanonicalIcaclsPath $layout.RunnerRoot /inheritance:r /grant:r "*$($identitySid):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" 2>&1
 if ($LASTEXITCODE -ne 0) {
   throw "Unable to restrict runner directory ACL to the current user and LocalSystem: $($aclOutput -join [Environment]::NewLine)"
 }
@@ -310,15 +312,20 @@ if (-not (Test-Path -LiteralPath (Join-Path $layout.RunnerRoot ".runner") -PathT
 }
 
 $installation = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 3
   version = $script:PinnedRunnerVersion
   archiveSha256 = $script:PinnedRunnerArchiveSha256
+  payloadFileCount = [int]$runnerPayload.fileCount
+  payloadTreeSha256 = [string]$runnerPayload.treeSha256
   repositoryUrl = $script:CanonicalRunnerRepositoryUrl
   labels = @("unified-ai-orchestrator")
   runnerName = $RunnerName
   runnerRoot = $layout.RunnerRoot
   taskName = $TaskName
   powerShellPath = $powerShellPath
+  arguments = $runnerArguments
+  identityName = $identityName
+  identitySid = $identitySid
   configured = $true
   installedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
 }

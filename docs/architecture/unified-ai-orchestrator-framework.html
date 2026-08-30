@@ -80,23 +80,23 @@
 
           <!-- GitHub components -->
           <rect x="45" y="88" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="88" width="220" height="80" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
-          <text x="155" y="116" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">GitHub Repository</text><text x="155" y="137" fill="#94a3b8" font-size="9" text-anchor="middle">PR · main · exact commit SHA</text><text x="155" y="151" fill="#fbbf24" font-size="8" text-anchor="middle">public source of truth</text>
+          <text x="155" y="116" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">GitHub Repository</text><text x="155" y="137" fill="#94a3b8" font-size="9" text-anchor="middle">PR · protected main · exact SHA</text><text x="155" y="151" fill="#fbbf24" font-size="8" text-anchor="middle">public source of truth</text>
           <rect x="45" y="218" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="218" width="220" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
           <text x="155" y="246" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Fixture CI</text><text x="155" y="267" fill="#94a3b8" font-size="9" text-anchor="middle">boundary · types · tests · build</text><text x="155" y="282" fill="#34d399" font-size="8" text-anchor="middle">must pass</text>
           <rect x="45" y="348" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="348" width="220" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
-          <text x="155" y="376" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Release Workflow</text><text x="155" y="397" fill="#94a3b8" font-size="9" text-anchor="middle">verify · audit gate · package</text><text x="155" y="412" fill="#34d399" font-size="8" text-anchor="middle">main only</text>
+          <text x="155" y="376" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Release Workflow</text><text x="155" y="397" fill="#94a3b8" font-size="9" text-anchor="middle">verify · dual build · immutable</text><text x="155" y="412" fill="#34d399" font-size="8" text-anchor="middle">main + environment gate</text>
           <rect x="45" y="478" width="220" height="80" rx="6" fill="#0f172a"/><rect x="45" y="478" width="220" height="80" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
-          <text x="155" y="506" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Immutable Release</text><text x="155" y="527" fill="#94a3b8" font-size="9" text-anchor="middle">ZIP · manifest · SHA-256</text><text x="155" y="542" fill="#fbbf24" font-size="8" text-anchor="middle">tagged to exact commit</text>
+          <text x="155" y="506" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Immutable Release</text><text x="155" y="527" fill="#94a3b8" font-size="9" text-anchor="middle">2 ZIPs · 2 checksums · audit</text><text x="155" y="542" fill="#fbbf24" font-size="8" text-anchor="middle">published immutable · exact SHA</text>
 
           <!-- Host release control -->
           <rect x="410" y="130" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="130" width="230" height="80" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
           <text x="525" y="158" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Self-hosted Runner</text><text x="525" y="179" fill="#94a3b8" font-size="9" text-anchor="middle">Windows · repository label</text><text x="525" y="194" fill="#fb7185" font-size="8" text-anchor="middle">local-production environment</text>
           <rect x="410" y="290" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="290" width="230" height="80" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
-          <text x="525" y="318" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Deployment Engine</text><text x="525" y="339" fill="#94a3b8" font-size="9" text-anchor="middle">verify · extract · install · probe</text><text x="525" y="354" fill="#34d399" font-size="8" text-anchor="middle">fail closed + automatic restore</text>
+          <text x="525" y="318" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Deployment Engine</text><text x="525" y="339" fill="#94a3b8" font-size="9" text-anchor="middle">D-backed Node · tree · ACL · probes</text><text x="525" y="354" fill="#34d399" font-size="8" text-anchor="middle">fail closed + automatic restore</text>
           <rect x="410" y="450" width="230" height="80" rx="6" fill="#0f172a"/><rect x="410" y="450" width="230" height="80" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
-          <text x="525" y="478" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Versioned Release Store</text><text x="525" y="499" fill="#94a3b8" font-size="9" text-anchor="middle">releases/&lt;40-char SHA&gt;</text><text x="525" y="514" fill="#a78bfa" font-size="8" text-anchor="middle">current + previous pointers</text>
+          <text x="525" y="478" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">Versioned Release Store</text><text x="525" y="499" fill="#94a3b8" font-size="9" text-anchor="middle">release + Node + crash receipts</text><text x="525" y="514" fill="#a78bfa" font-size="8" text-anchor="middle">current · previous · LKG controller</text>
           <rect x="410" y="555" width="230" height="38" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c" stroke-width="1"/>
-          <text x="525" y="579" fill="#fb923c" font-size="9" text-anchor="middle">Persistent supervised process</text>
+          <text x="525" y="579" fill="#fb923c" font-size="9" text-anchor="middle">Frozen controller · supervised process</text>
 
           <!-- Application -->
           <rect x="730" y="140" width="120" height="80" rx="6" fill="#0f172a"/><rect x="730" y="140" width="120" height="80" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
@@ -108,9 +108,9 @@
           <rect x="945" y="418" width="165" height="100" rx="6" fill="#0f172a"/><rect x="945" y="418" width="165" height="100" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
           <text x="1027" y="446" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Local Evidence</text><text x="1027" y="467" fill="#94a3b8" font-size="8" text-anchor="middle">immutable objects + receipts</text><text x="1027" y="483" fill="#94a3b8" font-size="8" text-anchor="middle">dashboard revisions + events</text><text x="1027" y="500" fill="#a78bfa" font-size="8" text-anchor="middle">ignored .local storage</text>
           <rect x="700" y="575" width="145" height="70" rx="6" fill="#0f172a"/><rect x="700" y="575" width="145" height="70" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
-          <text x="772" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Ollama</text><text x="772" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">qwen3:4b · local LLM</text>
+          <text x="772" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Ollama</text><text x="772" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">qwen3:4b · real inference gate</text>
           <rect x="960" y="575" width="145" height="70" rx="6" fill="#0f172a"/><rect x="960" y="575" width="145" height="70" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
-          <text x="1032" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">WhiteShadow</text><text x="1032" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">read-only capabilities</text>
+          <text x="1032" y="601" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">WhiteShadow</text><text x="1032" y="621" fill="#94a3b8" font-size="8" text-anchor="middle">allowlisted capability gate</text>
           <rect x="960" y="665" width="145" height="38" rx="6" fill="#0f172a"/><rect x="960" y="665" width="145" height="38" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
           <text x="1032" y="688" fill="#fb7185" font-size="9" text-anchor="middle">Qlik adapter · gated off</text>
           <rect x="1040" y="175" width="100" height="80" rx="6" fill="#0f172a"/><rect x="1040" y="175" width="100" height="80" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
@@ -166,9 +166,9 @@
     </section>
 
     <section class="cards">
-      <article class="card"><div class="card-header"><div class="card-dot rose"></div><h3>Safety boundary</h3></div><ul><li>- Loopback Host and CORS enforcement</li><li>- No uploaded executable code or packages</li><li>- Protected repository paths and branch policy</li><li>- Credentials never enter manifests or receipts</li></ul></article>
-      <article class="card"><div class="card-header"><div class="card-dot emerald"></div><h3>Release proof</h3></div><ul><li>- Exact main commit passes the full verifier</li><li>- Controlled production dependency audit</li><li>- Manifest and SHA-256 verified before install</li><li>- Readiness reports the deployed commit SHA</li></ul></article>
-      <article class="card"><div class="card-header"><div class="card-dot violet"></div><h3>Recovery model</h3></div><ul><li>- One directory per immutable release</li><li>- Atomic current and previous pointers</li><li>- Failed readiness restores prior release</li><li>- Manual rollback requires the exact prior SHA</li></ul></article>
+      <article class="card"><div class="card-header"><div class="card-dot rose"></div><h3>Safety boundary</h3></div><ul><li>- Loopback Host and CORS enforcement</li><li>- No uploaded executable code or packages</li><li>- Protected main and local-production gate</li><li>- Exact task SID and descendant ACL checks</li></ul></article>
+      <article class="card"><div class="card-header"><div class="card-dot emerald"></div><h3>Release proof</h3></div><ul><li>- Exact main commit passes the full verifier</li><li>- GitHub release must report immutable=true</li><li>- App, controller, Node, and SHA-256 verified</li><li>- Exact SHA plus both local AI gates pass</li></ul></article>
+      <article class="card"><div class="card-header"><div class="card-dot violet"></div><h3>Recovery model</h3></div><ul><li>- One sealed directory per release</li><li>- Hash-bound pending state restores crashes</li><li>- Frozen controller qualified after full acceptance</li><li>- Rollback uses no checkout/current scripts</li></ul></article>
     </section>
     <p class="footer">Unified AI Orchestrator · GitHub delivery + local-first AI + governed dashboard framework · 2026-08-29</p>
   </main>

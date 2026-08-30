@@ -42,6 +42,7 @@ const config: OrchestratorConfig = {
   host: "127.0.0.1",
   port: 8790,
   repositoryRoot,
+  releasePayloadRoot: repositoryRoot,
   evidenceRoot: resolve(repositoryRoot, ".local", "evidence"),
   trustGrantRelativePath: ".local/trust/workspace-grant.json",
   ollamaBaseUrl: "http://127.0.0.1:11434",

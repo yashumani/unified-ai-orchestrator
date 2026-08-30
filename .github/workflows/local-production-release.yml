@@ -47,7 +47,7 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Verify public boundary, types, tests, and production build
         run: npm run verify
@@ -80,6 +80,39 @@ jobs:
           -CommitSha "${{ github.sha }}"
           -OutputPath "${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip"
 
+      - name: Build deterministic recovery controller artifact
+        shell: pwsh
+        run: >-
+          ./scripts/release/New-RecoveryControllerArtifact.ps1
+          -RepositoryRoot "${{ github.workspace }}"
+          -CommitSha "${{ github.sha }}"
+          -OutputPath "${{ runner.temp }}/unified-ai-orchestrator-controller-${{ github.sha }}.zip"
+
+      - name: Rebuild and qualify deterministic release artifacts
+        shell: pwsh
+        run: |
+          $reproducibilityRoot = Join-Path "${{ runner.temp }}" "reproducibility"
+          [void](New-Item -ItemType Directory -Path $reproducibilityRoot -Force)
+          $releaseName = "unified-ai-orchestrator-${{ github.sha }}.zip"
+          $controllerName = "unified-ai-orchestrator-controller-${{ github.sha }}.zip"
+          ./scripts/release/New-ReleaseArtifact.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -CommitSha "${{ github.sha }}" `
+            -OutputPath (Join-Path $reproducibilityRoot $releaseName)
+          ./scripts/release/New-RecoveryControllerArtifact.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -CommitSha "${{ github.sha }}" `
+            -OutputPath (Join-Path $reproducibilityRoot $controllerName)
+          foreach ($name in @($releaseName, "$releaseName.sha256", $controllerName, "$controllerName.sha256")) {
+            $qualified = Join-Path "${{ runner.temp }}" $name
+            $rebuilt = Join-Path $reproducibilityRoot $name
+            $qualifiedHash = (Get-FileHash -LiteralPath $qualified -Algorithm SHA256).Hash.ToLowerInvariant()
+            $rebuiltHash = (Get-FileHash -LiteralPath $rebuilt -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($qualifiedHash -cne $rebuiltHash) {
+              throw "Release artifact creation is not deterministic: $name"
+            }
+          }
+
       - name: Upload immutable workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
         with:
@@ -87,6 +120,8 @@ jobs:
           path: |
             ${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip
             ${{ runner.temp }}/unified-ai-orchestrator-${{ github.sha }}.zip.sha256
+            ${{ runner.temp }}/unified-ai-orchestrator-controller-${{ github.sha }}.zip
+            ${{ runner.temp }}/unified-ai-orchestrator-controller-${{ github.sha }}.zip.sha256
             ${{ runner.temp }}/npm-audit-gate.json
           if-no-files-found: error
           retention-days: 30
@@ -101,6 +136,8 @@ jobs:
       (github.event_name == 'push' || inputs.operation == 'deploy')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment:
+      name: local-production
     permissions:
       contents: write
     steps:
@@ -114,40 +151,81 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_ADMIN_READ_TOKEN: ${{ secrets.REPOSITORY_ADMIN_READ_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_DIR: ${{ runner.temp }}/release
         run: |
           set -euo pipefail
+          api() {
+            gh api -H "X-GitHub-Api-Version: 2026-03-10" "$@"
+          }
+          test -n "${GH_ADMIN_READ_TOKEN}"
+          immutable_settings="$(GH_TOKEN="${GH_ADMIN_READ_TOKEN}" api "repos/${GH_REPO}/immutable-releases")"
+          test "$(jq -r '.enabled // false' <<<"${immutable_settings}")" = "true"
+          unset GH_ADMIN_READ_TOKEN
           tag="local-${RELEASE_SHA}"
           mapfile -t assets < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -print | sort)
-          test "${#assets[@]}" -eq 3
-          tag_sha="$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
-          if test -n "${tag_sha}"; then
-            test "${tag_sha}" = "${RELEASE_SHA}"
-          fi
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            existing_target="$(gh release view "${tag}" --json targetCommitish --jq .targetCommitish)"
-            test "${existing_target}" = "${RELEASE_SHA}"
-            test "${tag_sha}" = "${RELEASE_SHA}"
-            mapfile -t expected_names < <(for asset in "${assets[@]}"; do basename "${asset}"; done | sort)
-            mapfile -t existing_names < <(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)
-            test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${existing_names[@]}")"
-            existing_dir="${RUNNER_TEMP}/existing-release-${RELEASE_SHA}"
-            mkdir "${existing_dir}"
-            gh release download "${tag}" --dir "${existing_dir}"
-            for asset in "${assets[@]}"; do
-              cmp --silent "${asset}" "${existing_dir}/$(basename "${asset}")"
-            done
-          else
-            gh release create "${tag}" "${assets[@]}" \
+          test "${#assets[@]}" -eq 5
+          mapfile -t expected_names < <(for asset in "${assets[@]}"; do basename "${asset}"; done | sort)
+          mapfile -t release_ids < <(api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name == \"${tag}\") | .id")
+          test "${#release_ids[@]}" -le 1
+          if test "${#release_ids[@]}" -eq 0; then
+            gh release create "${tag}" \
+              --draft \
               --target "${RELEASE_SHA}" \
               --title "Local production ${RELEASE_SHA:0:12}" \
               --notes "Verified local-production artifact for ${RELEASE_SHA}." \
               --latest=false
-            created_tag_sha="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq .object.sha)"
-            test "${created_tag_sha}" = "${RELEASE_SHA}"
+            mapfile -t release_ids < <(api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name == \"${tag}\") | .id")
+            test "${#release_ids[@]}" -eq 1
           fi
+          release_id="${release_ids[0]}"
+          release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r .tag_name <<<"${release_json}")" = "${tag}"
+          test "$(jq -r .target_commitish <<<"${release_json}")" = "${RELEASE_SHA}"
+          test "$(jq -r .prerelease <<<"${release_json}")" = "false"
+          draft="$(jq -r .draft <<<"${release_json}")"
+          immutable="$(jq -r '.immutable // false' <<<"${release_json}")"
+          mapfile -t existing_names < <(jq -r '.assets[].name' <<<"${release_json}" | sort)
+          for existing_name in "${existing_names[@]}"; do
+            printf '%s\n' "${expected_names[@]}" | grep -Fqx -- "${existing_name}"
+          done
+          existing_dir="${RUNNER_TEMP}/existing-release-${RELEASE_SHA}"
+          mkdir -p "${existing_dir}"
+          for asset in "${assets[@]}"; do
+            name="$(basename "${asset}")"
+            asset_id="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<<"${release_json}")"
+            if test -n "${asset_id}"; then
+              api -H "Accept: application/octet-stream" "repos/${GH_REPO}/releases/assets/${asset_id}" > "${existing_dir}/${name}"
+              cmp --silent "${asset}" "${existing_dir}/${name}"
+            else
+              test "${draft}" = "true"
+              gh release upload "${tag}" "${asset}"
+            fi
+          done
+          release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+          mapfile -t uploaded_names < <(jq -r '.assets[].name' <<<"${release_json}" | sort)
+          test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${uploaded_names[@]}")"
+          if test "${draft}" = "true"; then
+            test "${immutable}" = "false"
+            gh release edit "${tag}" --draft=false --latest=false
+          fi
+          final_release_json="$(api "repos/${GH_REPO}/releases/${release_id}")"
+          test "$(jq -r .draft <<<"${final_release_json}")" = "false"
+          test "$(jq -r .prerelease <<<"${final_release_json}")" = "false"
+          test "$(jq -r '.immutable // false' <<<"${final_release_json}")" = "true"
+          test "$(jq -r .target_commitish <<<"${final_release_json}")" = "${RELEASE_SHA}"
+          tag_sha="$(api "repos/${GH_REPO}/git/matching-refs/tags/${tag}" --jq ".[] | select(.ref == \"refs/tags/${tag}\") | .object.sha")"
+          test "${tag_sha}" = "${RELEASE_SHA}"
+          mapfile -t final_names < <(jq -r '.assets[].name' <<<"${final_release_json}" | sort)
+          test "$(printf '%s\n' "${expected_names[@]}")" = "$(printf '%s\n' "${final_names[@]}")"
+          final_dir="${RUNNER_TEMP}/final-release-${RELEASE_SHA}"
+          mkdir "${final_dir}"
+          gh release download "${tag}" --dir "${final_dir}"
+          for asset in "${assets[@]}"; do
+            cmp --silent "${asset}" "${final_dir}/$(basename "${asset}")"
+          done
 
   deploy:
     name: Deploy exact release to local Windows production
@@ -164,7 +242,7 @@ jobs:
       - Windows
       - X64
       - unified-ai-orchestrator
-    timeout-minutes: 30
+    timeout-minutes: 180
     environment:
       name: local-production
     permissions:
@@ -174,6 +252,19 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Install or verify D-backed pinned Node.js runtime
+        shell: pwsh
+        run: >-
+          ./scripts/deployment/Install-PinnedNodeRuntime.ps1
+          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
+          -Confirm:$false
+
+      - name: Verify Windows deployment hardening contracts
+        shell: pwsh
+        run: >-
+          ./scripts/deployment/Test-DeploymentHardening.ps1
+          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
 
       - name: Download verified release artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact@v8
@@ -194,6 +285,13 @@ jobs:
           if ($expected -cne $actual) {
             throw "Downloaded artifact SHA-256 mismatch."
           }
+          $controllerArtifact = Join-Path $env:RELEASE_DIR "unified-ai-orchestrator-controller-$env:RELEASE_SHA.zip"
+          $controllerChecksumPath = "$controllerArtifact.sha256"
+          $controllerExpected = (Get-Content -LiteralPath $controllerChecksumPath -Raw).Trim().Split(' ')[0]
+          $controllerActual = (Get-FileHash -LiteralPath $controllerArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($controllerExpected -cne $controllerActual) {
+            throw "Downloaded recovery controller artifact SHA-256 mismatch."
+          }
 
       - name: Synchronize canonical main to the qualified SHA
         shell: pwsh
@@ -202,6 +300,24 @@ jobs:
           -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
           -ExpectedSha "${{ github.sha }}"
 
+      - name: Stage immutable recovery controller and bootstrap supervised task
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_DIR: ${{ runner.temp }}/release
+        run: |
+          $controllerArtifact = Join-Path $env:RELEASE_DIR "unified-ai-orchestrator-controller-$env:RELEASE_SHA.zip"
+          $controllerOutput = ./scripts/deployment/Install-RecoveryControllerArtifact.ps1 `
+            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
+            -ArtifactPath $controllerArtifact `
+            -ChecksumPath "$controllerArtifact.sha256" `
+            -Confirm:$false
+          $controller = ($controllerOutput -join "`n") | ConvertFrom-Json -AsHashtable
+          ./scripts/deployment/Install-LocalProductionTask.ps1 `
+            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
+            -ControllerSourceRoot ([string]$controller.controllerRoot) `
+            -Confirm:$false
+
       - name: Deploy exact artifact and restart supervised service
         shell: pwsh
         run: >-
@@ -209,15 +325,6 @@ jobs:
           -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
           -ArtifactPath "${{ runner.temp }}/release/unified-ai-orchestrator-${{ github.sha }}.zip"
           -ExpectedSha "${{ github.sha }}"
-          -HealthUri "http://127.0.0.1:8790/api/ready"
-
-      - name: Verify health, payload integrity, process receipt, and exact SHA
-        shell: pwsh
-        run: >-
-          ./scripts/deployment/Test-LocalRelease.ps1
-          -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
-          -ExpectedSha "${{ github.sha }}"
-          -RequireRepositoryHeadMatch
           -HealthUri "http://127.0.0.1:8790/api/ready"
 
   rollback:
@@ -237,36 +344,102 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out rollback scripts without persisted credentials
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Confirm requested rollback target
+      - name: Verify installed controller, roll back, and prove exact health
         shell: pwsh
         env:
           EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
         run: |
-          ./scripts/release/Confirm-RollbackTarget.ps1 `
-            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
-            -ExpectedPreviousSha $env:EXPECTED_ROLLBACK_SHA
+          $repositoryRoot = "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
+          $deploymentRoot = Join-Path $repositoryRoot ".local\deployment"
+          $controllersRoot = [System.IO.Path]::GetFullPath((Join-Path $deploymentRoot "controllers")).TrimEnd("\")
+          function Assert-PathWithoutReparsePoints {
+            param(
+              [Parameter(Mandatory)][string]$Path,
+              [switch]$Leaf
+            )
+            $fullPath = [System.IO.Path]::GetFullPath($Path)
+            $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+            $current = $pathRoot
+            foreach ($segment in [System.IO.Path]::GetRelativePath($pathRoot, $fullPath).Split("\")) {
+              if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq ".") {
+                continue
+              }
+              $current = Join-Path $current $segment
+              $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+              if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Rollback authority path traverses a reparse point: $current"
+              }
+            }
+            $finalItem = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+            if ($Leaf -and $finalItem.PSIsContainer) {
+              throw "Rollback authority expected a regular file: $fullPath"
+            }
+            if (-not $Leaf -and -not $finalItem.PSIsContainer) {
+              throw "Rollback authority expected a directory: $fullPath"
+            }
+            return $fullPath
+          }
+          [void](Assert-PathWithoutReparsePoints -Path $repositoryRoot)
+          [void](Assert-PathWithoutReparsePoints -Path $deploymentRoot)
+          [void](Assert-PathWithoutReparsePoints -Path (Join-Path $deploymentRoot "state"))
+          [void](Assert-PathWithoutReparsePoints -Path $controllersRoot)
+          $expectedSha = [string]$env:EXPECTED_ROLLBACK_SHA
+          if ($expectedSha -cnotmatch "^[0-9a-f]{40}$") {
+            throw "Rollback requires an exact lowercase 40-character SHA."
+          }
 
-      - name: Roll back atomically and restart supervised service
-        shell: pwsh
-        env:
-          EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
-        run: |
-          ./scripts/deployment/Rollback-LocalRelease.ps1 `
-            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
-            -ExpectedPreviousSha $env:EXPECTED_ROLLBACK_SHA `
-            -HealthUri "http://127.0.0.1:8790/api/ready"
+          $pointerPath = Join-Path $deploymentRoot "state\last-known-good-controller.json"
+          [void](Assert-PathWithoutReparsePoints -Path $pointerPath -Leaf)
+          $pointer = Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json -AsHashtable
+          $pointerKeys = @(
+            "schemaVersion", "controllerVersion", "controllerManifestSha256", "controllerRoot",
+            "qualifiedReleaseSha", "qualifiedAtUtc"
+          )
+          if (@($pointer.Keys | Where-Object { $_ -notin $pointerKeys }).Count -ne 0 -or
+              @($pointerKeys | Where-Object { $_ -notin $pointer.Keys }).Count -ne 0 -or
+              [int]$pointer.schemaVersion -ne 1 -or
+              [string]$pointer.controllerVersion -cne "1.0.0" -or
+              [string]$pointer.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$") {
+            throw "Last-known-good recovery controller pointer is invalid."
+          }
+          $controllerRoot = [System.IO.Path]::GetFullPath([string]$pointer.controllerRoot).TrimEnd("\")
+          $expectedControllerRoot = Join-Path $controllersRoot "$([string]$pointer.controllerVersion)-$([string]$pointer.controllerManifestSha256)"
+          if (-not [string]::Equals($controllerRoot, $expectedControllerRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Recovery controller path is outside the pinned controller identity."
+          }
+          [void](Assert-PathWithoutReparsePoints -Path $controllerRoot)
 
-      - name: Verify rolled-back health, payload integrity, process receipt, and SHA
-        shell: pwsh
-        env:
-          EXPECTED_ROLLBACK_SHA: ${{ inputs.rollback_sha }}
-        run: |
-          ./scripts/deployment/Test-LocalRelease.ps1 `
-            -RepositoryRoot "D:\Yashu-AI-Workspace\unified-ai-orchestrator" `
-            -ExpectedSha $env:EXPECTED_ROLLBACK_SHA `
-            -HealthUri "http://127.0.0.1:8790/api/ready"
+          $manifestPath = Join-Path $controllerRoot "controller-manifest.json"
+          [void](Assert-PathWithoutReparsePoints -Path $manifestPath -Leaf)
+          $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifestHash -cne [string]$pointer.controllerManifestSha256) {
+            throw "Recovery controller manifest hash mismatch."
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+          $requiredFiles = @(
+            "Deployment.Common.ps1", "Start-LocalRelease.ps1", "Stop-LocalRelease.ps1",
+            "Rollback-LocalRelease.ps1", "Test-LocalRelease.ps1", "Test-LocalAiRuntime.ps1"
+          )
+          if ([int]$manifest.schemaVersion -ne 1 -or
+              [string]$manifest.controllerVersion -cne [string]$pointer.controllerVersion -or
+              @($manifest.files.Keys | Where-Object { $_ -notin $requiredFiles }).Count -ne 0 -or
+              @($requiredFiles | Where-Object { $_ -notin $manifest.files.Keys }).Count -ne 0) {
+            throw "Recovery controller manifest file set is invalid."
+          }
+          foreach ($name in $requiredFiles) {
+            $path = Join-Path $controllerRoot $name
+            [void](Assert-PathWithoutReparsePoints -Path $path -Leaf)
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$manifest.files[$name]) {
+              throw "Recovery controller file hash mismatch for $name."
+            }
+          }
+
+          $previous = Get-Content -LiteralPath (Join-Path $deploymentRoot "previous.json") -Raw | ConvertFrom-Json -AsHashtable
+          if ([int]$previous.schemaVersion -ne 2 -or [string]$previous.commitSha -cne $expectedSha) {
+            throw "Requested rollback SHA does not match the current previous-release pointer."
+          }
+          & (Join-Path $controllerRoot "Rollback-LocalRelease.ps1") `
+            -RepositoryRoot $repositoryRoot `
+            -ExpectedPreviousSha $expectedSha `
+            -HealthUri "http://127.0.0.1:8790/api/ready" `
+            -Confirm:$false

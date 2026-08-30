@@ -25,6 +25,7 @@ describe("readConfig", () => {
       port: 8790,
       releaseSha: "development",
       repositoryRoot,
+      releasePayloadRoot: repositoryRoot,
       ollamaBaseUrl: "http://127.0.0.1:11434",
       whiteshadowBaseUrl: "http://127.0.0.1:8787"
     });
@@ -32,6 +33,35 @@ describe("readConfig", () => {
       "D:\\whiteshadow-workspace\\local-llm-ws\\.venv\\Scripts\\python.exe"
     );
     expect(PINNED_OLLAMA_MODEL).toBe("qwen3:4b");
+  });
+
+  it("binds immutable dashboard fixtures to the selected release during rollback", () => {
+    const firstSha = "a".repeat(40);
+    const secondSha = "b".repeat(40);
+    const configFor = (releaseSha: string) =>
+      readConfig(
+        {
+          ORCHESTRATOR_RELEASE_SHA: releaseSha,
+          ORCHESTRATOR_REPOSITORY_ROOT: repositoryRoot,
+          ORCHESTRATOR_WEB_DIST_ROOT:
+            `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${releaseSha}\\apps\\web\\dist`,
+          OLLAMA_EXECUTABLE: CANONICAL_OLLAMA_EXECUTABLE,
+          WHITESHADOW_WORKSPACE: CANONICAL_WHITESHADOW_WORKSPACE
+        },
+        repositoryRoot
+      );
+
+    const first = configFor(firstSha);
+    const second = configFor(secondSha);
+    expect(first.repositoryRoot).toBe(repositoryRoot);
+    expect(second.repositoryRoot).toBe(repositoryRoot);
+    expect(first.releasePayloadRoot).toBe(
+      `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${firstSha}`
+    );
+    expect(second.releasePayloadRoot).toBe(
+      `${CANONICAL_DEPLOYMENT_RELEASES_ROOT}\\${secondSha}`
+    );
+    expect(first.releasePayloadRoot).not.toBe(second.releasePayloadRoot);
   });
 
   it("accepts only a development marker or an exact lowercase release SHA", () => {

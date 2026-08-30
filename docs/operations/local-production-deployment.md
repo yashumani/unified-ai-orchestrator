@@ -9,9 +9,11 @@ This deployment keeps the complete Unified AI Orchestrator on the canonical Wind
 - Liveness is also checked internally at `http://127.0.0.1:8790/api/health`.
 - The canonical repository is `D:\Yashu-AI-Workspace\unified-ai-orchestrator`.
 - All installed releases, pointers, process receipts, backups, and deployment logs live under `.local\deployment`. The scripts reject another repository root, path traversal, reparse points in the deployment tree, non-loopback health URLs, malformed SHAs, and undeclared or hash-mismatched archive files.
-- Release archives cannot contain `.env*`, `.git`, `.local`, `node_modules`, raw/private/ChatGPT sources, or undeclared files. `npm ci --omit=dev --ignore-scripts` installs locked runtime dependencies after archive verification.
+- Release archives cannot contain `.env*`, `.git`, `.local`, `node_modules`, raw/private/ChatGPT sources, or undeclared files. The official Node.js `v22.23.2` Windows x64 archive is pinned to SHA-256 `1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97`, extracted under the D-backed deployment tree, and compared byte for byte on every qualification. Its npm `10.9.8` runs `npm ci --omit=dev --ignore-scripts` only after the payload has moved to its final release path, so workspace junctions cannot retain a staging target.
+- Windows archive names also reject alternate-data-stream separators, control characters, trailing dots or spaces, invalid characters, and reserved device names such as `CON`, `NUL`, `COM1`, and `LPT1` before any filesystem path is created.
+- Every runtime file, directory, and allowlisted workspace junction is inventoried. Regular files are SHA-256 hashed, the qualified D-backed Node identity is bound into the release receipt, and an external receipt seal is bound into the release pointer and process receipt. Release reuse, every start, rollback, and live acceptance recompute the contract. No release points into the transient GitHub Actions tool cache.
 - Runtime credentials are read from the canonical ignored `.env`; they are never copied into releases, logs, state backups, GitHub artifacts, or scheduled-task arguments.
-- The Windows task uses the current interactive identity with `LogonType Interactive` and `RunLevel Limited`. It stores no password.
+- The Windows tasks use the current interactive identity with `LogonType Interactive` and `RunLevel Limited`. Exact action, SID, trigger, description, restart settings, battery settings, and other normalized Task Scheduler fields are validated on every use. They store no password.
 
 ## Release layout
 
@@ -22,10 +24,18 @@ This deployment keeps the complete Unified AI Orchestrator on the canonical Wind
 ├── pending.json                 # exists only during activation
 ├── releases/<40-char-sha>/      # immutable extracted build + runtime dependencies
 ├── staging/                     # contained temporary extraction
-├── downloads/                   # checksum-pinned runner archive
+├── failed/                      # recoverable pre-activation quarantines
+├── controllers/1.0.0-<hash>/    # frozen hash-verified recovery controller
+├── downloads/                   # checksum-pinned Node and runner archives
+├── toolchains/node-v22.23.2-win-x64/ # official D-backed Node distribution
 ├── github-runner/2.337.0/       # pinned runner, credentials, diagnostics, and _work
 ├── state/process.json           # exact PID, SHA, entrypoint, Node path, and log paths
+├── state/runtime-dependencies/  # external per-release receipt seals
+├── state/recovery-controller-installation.json
+├── state/last-known-good-controller.json
+├── state/*-installation-pending.json # crash-recovery records, absent after commit
 ├── state/github-runner-*.json   # non-secret runner installation/process receipts
+├── state/node-runtime-installation.json # archive/tree/identity receipt
 ├── backups/<operation-id>/      # pointer/process-state snapshots only
 └── logs/
     ├── deployment-events.jsonl  # structured lifecycle events
@@ -41,7 +51,7 @@ The API entrypoint and React distribution are both loaded from the selected rele
 Requirements:
 
 - PowerShell 7.4 or newer discoverable as `pwsh.exe` (the installer records and validates the resolved executable; it does not assume one installation directory)
-- Node.js 22 or newer, `npm`, and Git on `PATH`
+- Git on `PATH`; the deployment installer provisions and verifies its own D-backed Node.js `v22.23.2` and npm `10.9.8`, so a release never depends on Actions tool-cache paths
 - `D:` connected and the canonical repository present
 - a clean `main` checkout tracking the exact GitHub release commit
 - the ignored `.env` configured at the repository root
@@ -49,6 +59,25 @@ Requirements:
 - a repository-scoped GitHub Actions self-hosted Windows runner registered through GitHub's normal ephemeral registration-token flow and running as the same Windows user that owns the scheduled task, Ollama, and WhiteShadow
 
 Do not put a GitHub token, Windows password, `.env` value, or runner registration token in command history.
+
+### Configure GitHub release governance
+
+Create one fine-grained personal access token restricted to `yashumani/unified-ai-orchestrator` with repository **Administration: Read-only** permission and no write permissions. Store it as the repository Actions secret `REPOSITORY_ADMIN_READ_TOKEN`. The package job uses it only to read the repository immutable-release setting before creating a release. The workflow explicitly removes it from the process environment before using the normal job token to publish, and no secret is referenced anywhere in the self-hosted deploy or rollback jobs.
+
+Enable immutable releases for the repository, create the `local-production` GitHub Environment with `main` as its only deployment branch, and protect `main` with strict required status check `Public fixture verification`. A release fails before draft creation if the immutable-release API does not report `enabled=true`.
+
+Do not use a broad classic token as this long-lived secret. Revoke any token that has been exposed and create the narrow read-only token above.
+
+### Install the pinned D-backed Node runtime
+
+Preview and then install the reviewed official distribution:
+
+```powershell
+pwsh -NoProfile -File .\scripts\deployment\Install-PinnedNodeRuntime.ps1 -WhatIf
+pwsh -NoProfile -File .\scripts\deployment\Install-PinnedNodeRuntime.ps1 -Confirm:$false
+```
+
+The installer downloads only the fixed `node-v22.23.2-win-x64.zip` URL when the archive is absent, checks the reviewed SHA-256 before extraction, rejects traversal, duplicate, extra, or reparse-point entries, verifies every installed file against the archive, requires Node `v22.23.2` and npm `10.9.8`, seals the tree read/execute, and writes a non-secret installation receipt. Reruns revalidate the entire distribution instead of trusting the receipt alone.
 
 ### Install the repository runner
 
@@ -78,7 +107,7 @@ The configured runner has the default `self-hosted`, `Windows`, and `X64` labels
 
 Installation is idempotent when the validated state, pinned binary, registration, and exact task already exist. If remote registration succeeds but task creation or startup is interrupted, the durable validated installation state lets a rerun recreate or restart the exact task. A directory or task without matching state fails closed instead of being reused or overwritten.
 
-Preview and install the supervised task from an interactive terminal running as the same Windows user that owns Ollama and WhiteShadow:
+The application task never points at mutable repository scripts. Installation first verifies `controller-manifest.json`, copies the six-script recovery bundle plus its manifest to a content-addressed controller directory, seals it read/execute for the task identity, and points the task at that frozen launcher. The bundle includes the exact rollback, release verification, and local-AI acceptance scripts. When replacing an existing controller, the transaction stops the current process through the prior verified controller, registers the new task, restarts the same current release, and requires exact readiness, served-web hash, and live-process proof before committing. Failure restores and proves the prior task/controller. Preview and install it from an interactive terminal running as the same Windows user that owns Ollama and WhiteShadow:
 
 ```powershell
 Set-Location 'D:\Yashu-AI-Workspace\unified-ai-orchestrator'
@@ -98,21 +127,38 @@ Installation does not start a release when `current.json` is absent. At later lo
 
 The governed delivery order is:
 
-1. Pull request verification runs the public-boundary check, tests, typecheck, and production build.
+1. Pull request verification runs the public-boundary check, tests, typecheck, and production build. Protected `main` requires that check.
 2. The approved pull request is merged to `main`.
-3. The release job creates an archive whose root contains `release-manifest.json` and only manifest-declared payload files. Every payload file has a SHA-256 digest, and the manifest carries the exact 40-character commit SHA and lockfile digest.
-4. GitHub publishes the immutable artifact/release.
-5. The self-hosted Windows deployment job synchronizes the clean canonical `main` checkout by fast-forward only to that exact SHA. Deployment scripts never change Git state themselves.
-6. `Deploy-LocalRelease.ps1` validates the canonical source, archive, hashes, task registration, Node runtime, and locked dependency installation.
-7. Activation backs up pointer/process state, stops only the recorded orchestrator process, changes the release pointer, and starts the supervised task.
-8. The job requires liveness, exact-SHA readiness, evidence readiness, a live exact-process receipt, and byte-for-byte equality between the served and packaged React index.
-9. Only after those checks pass does the prior pointer become `previous.json`. If activation fails, the script restores the old pointer, restarts the old release, checks its readiness, and fails the job.
+3. The release job creates both application and recovery-controller artifacts twice with identical basenames, compares both ZIPs and both checksum sidecars byte for byte, and only then uploads the first qualified copies. The application archive contains `release-manifest.json` and only manifest-declared payload files. Every payload file has a SHA-256 digest, and the manifest carries the exact 40-character commit SHA and lockfile digest.
+4. The `local-production` GitHub Environment gates release publication and local execution. GitHub repository immutable releases must be enabled; the release is created as a draft, populated with the app artifact, recovery-controller artifact, both checksums, and audit receipt, then published and required to report `immutable=true`.
+5. Before touching an application release, the self-hosted Windows job installs or revalidates the official D-backed Node runtime and executes the Windows hardening and state-recovery fixtures.
+6. The job synchronizes the clean canonical `main` checkout by fast-forward only to that exact SHA. `Sync-CanonicalMain.ps1` is the only delivery script allowed to switch/fast-forward the canonical Git checkout; deploy/rollback scripts never alter Git.
+7. The job installs or verifies the published frozen recovery controller and exact application task. An existing current release must survive a behaviorally verified controller handoff before the task change commits. `Deploy-LocalRelease.ps1` then validates the canonical source, archive, hashes, task registration, D-backed Node runtime, and locked dependency installation.
+8. Activation writes a SHA-bound backup manifest and pending transaction, stops only the recorded orchestrator process, changes the release pointer, and starts the supervised task.
+9. Inside that same uncommitted transaction, the deploy script requires liveness, exact-SHA readiness, evidence readiness, a live exact-process receipt, byte-for-byte equality between the served and packaged React index, both governed local AI backends ready, a WhiteShadow allowlisted capability call, and a bounded real `qwen3:4b` Ollama inference.
+10. Only after every check passes is `pending.json` removed, which is the single activation commit point. If installation or activation is interrupted, the next locked operation either completes a fully qualified immutable install or quarantines it, verifies the hash-bound prior state before stopping anything, restores the prior pointers, restarts the prior release, and requires readiness, the packaged web hash, and the exact live-process receipt before clearing the recovery record. Foreign transaction pending records block Node, controller, and task mutations until the owning recovery completes.
 
 The manual equivalent, useful for diagnosis with a downloaded GitHub release artifact, is:
 
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
-$artifact = 'D:\Downloads\unified-ai-orchestrator-release.zip'
+$artifact = "D:\Downloads\unified-ai-orchestrator-$sha.zip"
+$controllerArtifact = "D:\Downloads\unified-ai-orchestrator-controller-$sha.zip"
+
+pwsh -NoProfile -File .\scripts\deployment\Install-PinnedNodeRuntime.ps1 `
+  -Confirm:$false
+
+pwsh -NoProfile -File .\scripts\deployment\Install-RecoveryControllerArtifact.ps1 `
+  -ArtifactPath $controllerArtifact `
+  -ChecksumPath "$controllerArtifact.sha256" `
+  -Confirm:$false
+
+. .\scripts\deployment\Deployment.Common.ps1
+$layout = Get-DeploymentLayout -RepositoryRoot (Get-Location).Path
+$controller = Read-RecoveryControllerInstallation -Layout $layout
+pwsh -NoProfile -File .\scripts\deployment\Install-LocalProductionTask.ps1 `
+  -ControllerSourceRoot $controller.controllerRoot `
+  -Confirm:$false
 
 pwsh -NoProfile -File .\scripts\deployment\Deploy-LocalRelease.ps1 `
   -ArtifactPath $artifact `
@@ -129,6 +175,9 @@ pwsh -NoProfile -File .\scripts\deployment\Test-LocalRelease.ps1 `
   -ExpectedSha $sha `
   -RequireRepositoryHeadMatch `
   -HealthUri 'http://127.0.0.1:8790/api/ready'
+
+pwsh -NoProfile -File .\scripts\deployment\Test-LocalAiRuntime.ps1 `
+  -TimeoutSeconds 180
 ```
 
 Deployment from a feature branch, dirty checkout, uppercase/short SHA, mismatched artifact, missing task, unsafe archive, or non-loopback endpoint fails before activation.
@@ -145,6 +194,8 @@ Get-Content "$deployment\state\process.json" -Raw
 Invoke-RestMethod 'http://127.0.0.1:8790/api/ready'
 pwsh -NoProfile -File .\scripts\deployment\Test-LocalRelease.ps1 `
   -ExpectedSha $current.commitSha
+pwsh -NoProfile -File .\scripts\deployment\Test-LocalAiRuntime.ps1 `
+  -TimeoutSeconds 180
 
 Get-Content "$deployment\logs\deployment-events.jsonl" -Tail 30
 Get-Content "$deployment\logs\deployment-events.jsonl" -Wait
@@ -156,20 +207,19 @@ The GitHub runner writes its own diagnostics under `.local\deployment\github-run
 
 ## Rollback
 
-Rollback changes the deployed API binaries and React bundle; it never runs `git checkout`, rewrites evidence, edits `.env`, or downloads a model. It swaps `current.json` and `previous.json` only after the rollback target passes exact-SHA readiness.
+Rollback changes the deployed API binaries and React bundle; it never runs `git checkout`, rewrites evidence, edits `.env`, or downloads a model. The GitHub rollback job performs no checkout and executes no `./scripts` path. It independently verifies the last-known-good controller pointer, manifest, path, and every controller hash, then invokes the installed frozen rollback entrypoint. That entrypoint runs release and local-AI verification before it removes the pending record, so there is no fallible post-commit acceptance step. The stable rollback code rechecks the target, React/API identity, both local-AI backends, and all local contracts inside the deployment lock.
 
 ```powershell
-$previous = Get-Content '.\.local\deployment\previous.json' -Raw | ConvertFrom-Json
-pwsh -NoProfile -File .\scripts\deployment\Rollback-LocalRelease.ps1 `
+$deployment = 'D:\Yashu-AI-Workspace\unified-ai-orchestrator\.local\deployment'
+$previous = Get-Content "$deployment\previous.json" -Raw | ConvertFrom-Json
+$controller = Get-Content "$deployment\state\last-known-good-controller.json" -Raw | ConvertFrom-Json
+
+pwsh -NoProfile -File (Join-Path $controller.controllerRoot 'Rollback-LocalRelease.ps1') `
   -ExpectedPreviousSha $previous.commitSha `
   -WhatIf
-pwsh -NoProfile -File .\scripts\deployment\Rollback-LocalRelease.ps1 `
-  -ExpectedPreviousSha $previous.commitSha
-pwsh -NoProfile -File .\scripts\deployment\Test-LocalRelease.ps1 `
-  -ExpectedSha $previous.commitSha
 ```
 
-The rollback script re-reads `previous.json` inside the cross-session deployment lock and rejects the operation if the pointer changed after the operator selected it.
+Normal operation should dispatch the `Local Production Release` workflow with operation `rollback` and the exact `previous.json` SHA. The direct command above is diagnostic preview only. The rollback script re-reads `previous.json` inside the cross-session deployment lock and rejects the operation if the pointer changed after the operator selected it.
 
 The repository tools intentionally continue to operate on the canonical working tree. Therefore, a binary rollback does not roll back repository content, dashboard sample files, `.env`, trust state, or evidence. If compatibility requires a matching repository revision, perform a separately reviewed clean fast-forward/revert in Git and deploy that commit as a new release instead of forcing the working tree backward.
 
@@ -212,8 +262,9 @@ try {
 - This is single-machine, single-user local production. It is not a public website, remote multi-user service, or high-availability deployment.
 - The task uses interactive logon rather than a stored password or service account. The user must log on after a reboot before the application starts.
 - The self-hosted runner and application require `D:` to remain connected.
-- Ollama and WhiteShadow remain separate local dependencies. Startup does not pull, update, or replace models.
+- Ollama and WhiteShadow remain separate local dependencies. Production acceptance requires both, including a bounded real Ollama inference and an allowlisted WhiteShadow capability call. Startup does not pull, update, or replace models.
 - Qlik remains a separately configured and governed adapter. Deployment does not enable it or add credentials.
 - Releases are retained until manually reviewed; disk-capacity monitoring is an operator responsibility.
+- NTFS ACLs are an operational drift guard, not a separate hostile-user security boundary: the runner, application, and release owner intentionally share this single-user Windows identity. Every descendant ACL and content hash is revalidated, but genuine protection from the machine owner would require a separate unprivileged runtime identity and privileged sealing service.
 - The pinned GitHub runner has automatic updates disabled. When GitHub requires a newer runner, update the version, official URL, checksum, validation, and operator record through a reviewed release rather than modifying the installation in place.
 - The known high transitive `undici` advisory below `@copilotkit/runtime` remains a release caveat until a stable compatible upstream fix exists. Loopback-only exposure reduces reachability but does not erase the advisory.

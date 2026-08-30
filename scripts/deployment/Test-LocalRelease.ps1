@@ -6,7 +6,8 @@ param(
   [string]$ExpectedSha,
   [string]$HealthUri = "http://127.0.0.1:8790/api/ready",
   [switch]$RequireRepositoryHeadMatch,
-  [ValidateRange(1, 60)][int]$HealthTimeoutSeconds = 20,
+  [ValidateRange(1, 300)][int]$HealthTimeoutSeconds = 180,
+  [ValidateRange(1, 600)][int]$IntegrityTimeoutSeconds = 180,
   [string]$TaskName = "UnifiedAIOrchestrator-Local"
 )
 
@@ -33,6 +34,20 @@ if ($RequireRepositoryHeadMatch) {
 
 $releaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha $ExpectedSha
 $manifest = Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha
+$runtimeTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$runtimeReceipt = Test-RuntimeDependencyIntegrity `
+  -Layout $layout `
+  -ReleaseRoot $releaseRoot `
+  -ExpectedSha $ExpectedSha `
+  -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256)
+$runtimeTimer.Stop()
+$aclTimer = [System.Diagnostics.Stopwatch]::StartNew()
+[void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
+$aclTimer.Stop()
+if ($runtimeTimer.Elapsed.TotalSeconds -gt $IntegrityTimeoutSeconds -or
+    $aclTimer.Elapsed.TotalSeconds -gt $IntegrityTimeoutSeconds) {
+  throw "Release integrity or recursive ACL qualification exceeded the $IntegrityTimeoutSeconds-second production budget."
+}
 $live = Get-LiveReleaseProcess -Layout $layout -ExpectedSha $ExpectedSha
 if ($null -eq $live) {
   throw "No live process matches the selected release SHA."
@@ -43,6 +58,10 @@ if ([string]$task.State -ne "Running") {
 }
 [void](Wait-ForReleaseHealth -HealthUri $HealthUri -ExpectedSha $ExpectedSha -TimeoutSeconds $HealthTimeoutSeconds)
 $webIndexSha256 = Test-ReleaseWebDocument -ReleaseRoot $releaseRoot -TimeoutSeconds 10
+$recoveryController = Read-LastKnownGoodRecoveryController -Layout $layout
+if ([string]$recoveryController.qualifiedReleaseSha -cne $ExpectedSha) {
+  throw "Last-known-good recovery controller is not qualified for the selected release."
+}
 
 $result = [ordered]@{
   accepted = $true
@@ -56,6 +75,16 @@ $result = [ordered]@{
   readinessUri = $script:CanonicalReadyUri
   webIndexSha256 = $webIndexSha256
   packageLockSha256 = [string]$manifest.packageLockSha256
+  runtimeTreeSha256 = [string]$runtimeReceipt.treeSha256
+  runtimeFileCount = [int]$runtimeReceipt.fileCount
+  runtimeLinkCount = [int]$runtimeReceipt.linkCount
+  runtimeIntegrityMilliseconds = [int64]$runtimeTimer.ElapsedMilliseconds
+  recursiveAclVerificationMilliseconds = [int64]$aclTimer.ElapsedMilliseconds
+  integrityBudgetSeconds = $IntegrityTimeoutSeconds
+  releaseIdentitySid = [string]$runtimeReceipt.identitySid
+  releaseAclProtected = $true
+  recoveryControllerVersion = [string]$recoveryController.controllerVersion
+  recoveryControllerManifestSha256 = [string]$recoveryController.controllerManifestSha256
   repositoryHeadRequired = [bool]$RequireRepositoryHeadMatch
 }
 $result | ConvertTo-Json -Depth 10

@@ -14,7 +14,14 @@ $installation = Read-GitHubRunnerInstallation -Layout $layout
 if (-not [bool]$installation.configured) {
   throw "GitHub runner is not configured."
 }
-[void](Assert-PinnedRunnerBinary -Layout $layout)
+[void](Assert-GitHubRunnerTaskRegistration `
+    -RepositoryRoot $RepositoryRoot `
+    -Layout $layout `
+    -Installation $installation)
+[void](Assert-PinnedRunnerBinary `
+    -Layout $layout `
+    -ExpectedFileCount ([int]$installation.payloadFileCount) `
+    -ExpectedTreeSha256 ([string]$installation.payloadTreeSha256))
 foreach ($path in @(
     (Join-Path $layout.RunnerRoot ".runner"),
     (Join-Path $layout.RunnerRoot ".credentials")

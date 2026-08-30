@@ -5,7 +5,7 @@ param(
   [string]$RepositoryRoot = "D:\Yashu-AI-Workspace\unified-ai-orchestrator",
   [string]$HealthUri = "http://127.0.0.1:8790/api/ready",
   [switch]$Supervised,
-  [ValidateRange(1, 60)][int]$HealthTimeoutSeconds = 45
+  [ValidateRange(1, 300)][int]$HealthTimeoutSeconds = 180
 )
 
 . (Join-Path $PSScriptRoot "Deployment.Common.ps1")
@@ -17,15 +17,33 @@ try {
   [void](Assert-CanonicalHealthUri -HealthUri $HealthUri)
   $layout = Get-DeploymentLayout -RepositoryRoot $RepositoryRoot
   Assert-NoDeploymentReparsePoints -Layout $layout
+  [void](Assert-DeploymentTaskRegistration -RepositoryRoot $RepositoryRoot -TaskName $script:CanonicalTaskName)
+  if ($Supervised) {
+    $taskInstallation = Read-DeploymentTaskInstallation -Layout $layout
+    if (-not [string]::Equals(
+        [System.IO.Path]::GetFullPath($PSCommandPath),
+        [System.IO.Path]::GetFullPath([string]$taskInstallation.startScript),
+        [System.StringComparison]::OrdinalIgnoreCase
+      )) {
+      throw "Supervised startup must run from the installed immutable recovery controller."
+    }
+  }
   $mutex = Enter-DeploymentMutex
+  if ([bool]$mutex.WasAbandoned) {
+    Assert-NoDeploymentReparsePoints -Layout $layout
+    Write-DeploymentEvent -Layout $layout -Action "lock-recovery" -Status "info" -Message "Recovered an abandoned deployment-state mutex after revalidating deployment paths."
+  }
 
   $pointer = Read-ReleasePointer -Path $layout.Current
   $commitSha = [string]$pointer.commitSha
   $releaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha $commitSha
   [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $commitSha)
-  if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot "node_modules") -PathType Container)) {
-    throw "Release dependencies are missing. Deploy the release before starting it."
-  }
+  $runtimeReceipt = Test-RuntimeDependencyIntegrity `
+    -Layout $layout `
+    -ReleaseRoot $releaseRoot `
+    -ExpectedSha $commitSha `
+    -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256)
+  [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
 
   $existing = Get-LiveReleaseProcess -Layout $layout -ExpectedSha $commitSha
   if ($null -ne $existing) {
@@ -37,7 +55,7 @@ try {
     Remove-Item -LiteralPath $layout.Process -Force
   }
 
-  $nodePath = Get-StableExecutable -Name "node.exe"
+  $nodePath = [string]$runtimeReceipt.nodePath
   $nodeVersion = Assert-NodeRuntime -NodePath $nodePath
   $entrypoint = Join-Path $releaseRoot "apps\api\dist\server.js"
   $webDistRoot = Join-Path $releaseRoot "apps\web\dist"
@@ -81,12 +99,14 @@ try {
   }
 
   $receipt = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     commitSha = $commitSha
     pid = $child.Id
     entrypoint = $entrypoint
     nodePath = $nodePath
     nodeVersion = $nodeVersion
+    nodeSha256 = [string]$runtimeReceipt.nodeSha256
+    runtimeDependencyReceiptSha256 = [string]$runtimeReceipt.runtimeIntegritySha256
     startedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     stdoutPath = $stdoutPath
     stderrPath = $stderrPath

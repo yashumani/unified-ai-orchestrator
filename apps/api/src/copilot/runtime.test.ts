@@ -31,6 +31,7 @@ const config: OrchestratorConfig = {
   host: "127.0.0.1",
   port: 8790,
   repositoryRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
+  releasePayloadRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
   evidenceRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator\\.local\\evidence",
   trustGrantRelativePath: ".local/trust/workspace-grant.json",
   ollamaBaseUrl: "http://127.0.0.1:11434",

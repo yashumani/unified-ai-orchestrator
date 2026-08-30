@@ -4,16 +4,29 @@ import {
   TrustStateSchema
 } from "@unified-ai/contracts";
 import { DashboardManifestSchema } from "@unified-ai/contracts/dashboard-builder";
-import { readFileSync } from "node:fs";
+import type { RequestHandler } from "express";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import type { OrchestratorConfig } from "./config.js";
 import type { OrchestratorServices } from "./composition.js";
 
 const servers: Server[] = [];
+const temporaryDirectories: string[] = [];
+
+vi.mock("./copilot/runtime.js", () => ({
+  createCopilotHandler: vi.fn(
+    async () =>
+      ((_, response) => {
+        response.status(404).json({ error: "Copilot route not found" });
+      }) satisfies RequestHandler
+  )
+}));
 const dashboardSampleBytes = readFileSync(
   new URL(
     "../../../sources/fixtures/dashboard-builder/sales-overview.manifest.json",
@@ -29,8 +42,11 @@ afterEach(async () => {
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve) => server.close(() => resolve()))
-    )
+      )
   );
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 const config: OrchestratorConfig = {
@@ -38,6 +54,7 @@ const config: OrchestratorConfig = {
   port: 8790,
   releaseSha: "deb2a583234af99043fd383ca59a7be0bbde8e29",
   repositoryRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
+  releasePayloadRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator",
   evidenceRoot: "D:\\Yashu-AI-Workspace\\unified-ai-orchestrator\\.local\\evidence",
   trustGrantRelativePath: ".local/trust/workspace-grant.json",
   ollamaBaseUrl: "http://127.0.0.1:11434",
@@ -202,6 +219,41 @@ async function rawGetWithHost(
 }
 
 describe("local API", () => {
+  it("keeps the Copilot runtime scoped so the React bundle remains reachable", async () => {
+    const webDistRoot = mkdtempSync(join(tmpdir(), "unified-ai-web-"));
+    temporaryDirectories.push(webDistRoot);
+    writeFileSync(
+      join(webDistRoot, "index.html"),
+      "<!doctype html><html><body>dashboard shell</body></html>",
+      "utf8"
+    );
+    const webConfig = { ...config, webDistRoot };
+    const app = await createApp({
+      config: webConfig,
+      services: services({ config: webConfig }),
+      mountCopilotRuntime: true,
+      serveWeb: true
+    });
+    const server = app.listen(0, "127.0.0.1");
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const web = await fetch(`${baseUrl}/`);
+    expect(web.status).toBe(200);
+    await expect(web.text()).resolves.toContain("dashboard shell");
+
+    const copilot = await fetch(`${baseUrl}/api/copilotkit/unknown`);
+    expect(copilot.status).toBe(404);
+    await expect(copilot.json()).resolves.toEqual({
+      error: "Copilot route not found"
+    });
+  });
+
   it("exposes health, runtime start, trust, capabilities, and receipt summaries", async () => {
     const baseUrl = await startLocal(services());
     const health = await fetch(`${baseUrl}/api/health`);

@@ -145,7 +145,7 @@ export async function createServices(
     repositoryRoot: config.repositoryRoot
   });
   await evidence.initialize();
-  const dashboardSample = await loadDashboardSample(config.repositoryRoot);
+  const dashboardSample = await loadDashboardSample(config.releasePayloadRoot);
   const dashboardService = new DashboardService({
     evidence,
     adapters: new DashboardAdapterRegistry([
