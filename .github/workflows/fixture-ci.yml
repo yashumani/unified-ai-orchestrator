@@ -46,10 +46,34 @@ jobs:
           $secondApp = Join-Path $env:RUNNER_TEMP "application-second.zip"
           $firstController = Join-Path $env:RUNNER_TEMP "controller-first.zip"
           $secondController = Join-Path $env:RUNNER_TEMP "controller-second.zip"
-          ./scripts/release/New-ReleaseArtifact.ps1 `
-            -RepositoryRoot $env:GITHUB_WORKSPACE `
-            -CommitSha $env:CHECKOUT_SHA `
-            -OutputPath $firstApp
+          $staleMarkerRelative = "apps/api/dist/stale-release-marker.txt"
+          $staleMarker = Join-Path $env:GITHUB_WORKSPACE $staleMarkerRelative
+          New-Item -ItemType Directory -Path (Split-Path -Parent $staleMarker) -Force | Out-Null
+          Set-Content -LiteralPath $staleMarker -Value "must-not-ship" -NoNewline
+          Push-Location -LiteralPath $env:RUNNER_TEMP
+          try {
+            & (Join-Path $env:GITHUB_WORKSPACE "scripts/release/New-ReleaseArtifact.ps1") `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -CommitSha $env:CHECKOUT_SHA `
+              -OutputPath $firstApp
+          }
+          finally {
+            Pop-Location
+          }
+          if (Test-Path -LiteralPath $staleMarker) {
+            throw "Release source build retained a stale generated output."
+          }
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($firstApp)
+          try {
+            if (@($archive.Entries | Where-Object { $_.FullName -ceq $staleMarkerRelative }).Count -ne 0) {
+              throw "Release archive retained a stale generated output."
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
           ./scripts/release/New-ReleaseArtifact.ps1 `
             -RepositoryRoot $env:GITHUB_WORKSPACE `
             -CommitSha $env:CHECKOUT_SHA `

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "controllerVersion": "1.0.1",
   "files": {
-    "Deployment.Common.ps1": "2509def803e525407280b951c0521fb81761147da0608a90cbf1f7beaaeb3eca",
+    "Deployment.Common.ps1": "5ebc28672d3ff4b644f4936c6e8a508f59fa6d7c7b981110a5ac1fa32535b423",
     "Start-LocalRelease.ps1": "fd0ecf1e6c8a0b26e926c77b5c468e0f078c11272fd550a84933c9309df7f271",
     "Stop-LocalRelease.ps1": "b07cccf07a4e085eac8059d4884063204f282e2e7d620f700ef2b08e5faec9fb",
     "Rollback-LocalRelease.ps1": "9be3425c3b3d94a6d4b8036a6ac9637a120182bec3370558afb5dd108917b9f0",

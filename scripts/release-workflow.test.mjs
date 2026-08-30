@@ -75,6 +75,25 @@ describe("local production release workflow contract", () => {
     expect(workflow).not.toContain("--clobber");
   });
 
+  it("qualifies packaging from an external working directory without stale dist payloads", async () => {
+    const workflow = await readFile(fixtureWorkflowPath, "utf8");
+    expect(workflow).toContain(
+      '$staleMarkerRelative = "apps/api/dist/stale-release-marker.txt"'
+    );
+    expect(workflow).toContain(
+      "Push-Location -LiteralPath $env:RUNNER_TEMP"
+    );
+    expect(workflow).toContain(
+      '& (Join-Path $env:GITHUB_WORKSPACE "scripts/release/New-ReleaseArtifact.ps1")'
+    );
+    expect(workflow).toContain(
+      "$_.FullName -ceq $staleMarkerRelative"
+    );
+    expect(workflow).toContain(
+      "Release archive retained a stale generated output."
+    );
+  });
+
   it("deploys only main to the guarded local Windows environment", async () => {
     const workflow = await readFile(releaseWorkflowPath, "utf8");
     expect(workflow).toContain("github.ref == 'refs/heads/main'");

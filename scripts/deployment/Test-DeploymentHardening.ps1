@@ -757,6 +757,7 @@ $stateFixture = [ordered]@{
   ControllerInstallation = Join-Path $stateTestRoot "state\recovery-controller-installation.json"
   TaskInstallation = Join-Path $stateTestRoot "state\local-production-task-installation.json"
   Logs = Join-Path $stateTestRoot "logs"
+  Events = Join-Path $stateTestRoot "logs\deployment-events.jsonl"
 }
 try {
   [void](New-Item -ItemType Directory -Path $stateFixture.Backups -Force)
@@ -846,6 +847,37 @@ try {
           Where-Object { $_.Name -like ".startup-diagnostic.json.*.tmp" }
       ).Count -ne 0) {
     throw "Startup diagnostic did not persist the bounded atomic failure contract."
+  }
+
+  Write-DeploymentEvent `
+    -Layout $stateFixture `
+    -Action "deploy" `
+    -Status "started" `
+    -CommitSha ("6" * 40) `
+    -OperationId "20260830T120000Z-123456789abc" `
+    -Message "Deployment event JSON Lines fixture started."
+  Write-DeploymentEvent `
+    -Layout $stateFixture `
+    -Action "deploy" `
+    -Status "succeeded" `
+    -CommitSha ("6" * 40) `
+    -OperationId "20260830T120000Z-123456789abc" `
+    -Message ("x" * 700)
+  $deploymentEventLines = @(Get-Content -LiteralPath $stateFixture.Events)
+  if ($deploymentEventLines.Count -ne 2) {
+    throw "Deployment event log did not write exactly one JSON object per line."
+  }
+  $startedEvent = ConvertFrom-DeploymentJsonHashtable -Json $deploymentEventLines[0]
+  $succeededEvent = ConvertFrom-DeploymentJsonHashtable -Json $deploymentEventLines[1]
+  if ([int]$startedEvent.schemaVersion -ne 1 -or
+      [string]$startedEvent.action -cne "deploy" -or
+      [string]$startedEvent.status -cne "started" -or
+      [string]$startedEvent.commitSha -cne ("6" * 40) -or
+      [string]$startedEvent.operationId -cne "20260830T120000Z-123456789abc" -or
+      [string]$startedEvent.message -cne "Deployment event JSON Lines fixture started." -or
+      [string]$succeededEvent.status -cne "succeeded" -or
+      ([string]$succeededEvent.message).Length -ne 500) {
+    throw "Deployment event log did not preserve its bounded JSON Lines contract."
   }
   Write-AtomicJson -Layout $stateFixture -Path $stateFixture.Current -Value ([ordered]@{ marker = "current-before" })
   Write-AtomicJson -Layout $stateFixture -Path $stateFixture.LastKnownGoodController -Value ([ordered]@{ marker = "controller-before" })

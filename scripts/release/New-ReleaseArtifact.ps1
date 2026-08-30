@@ -24,6 +24,73 @@ function Invoke-Git {
   return @($output)
 }
 
+function Assert-RepositoryReleaseState {
+  param([Parameter(Mandatory = $true)][string]$ExpectedSha)
+
+  $actualSha = ([string](Invoke-Git -Arguments @('rev-parse', 'HEAD') | Select-Object -First 1)).Trim()
+  if ($actualSha -cne $ExpectedSha) {
+    throw "Repository HEAD $actualSha does not match release SHA $ExpectedSha."
+  }
+  $repositoryChanges = @(Invoke-Git -Arguments @('status', '--porcelain', '--untracked-files=all'))
+  if ($repositoryChanges.Count -ne 0) {
+    throw 'Tracked or untracked repository changes are forbidden while packaging a release.'
+  }
+}
+
+function Clear-GeneratedBuildOutputs {
+  $repositoryItem = Get-Item -LiteralPath $resolvedRepositoryRoot -Force
+  if (($repositoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Release repository root cannot be a reparse point: $resolvedRepositoryRoot"
+  }
+
+  foreach ($workspaceRoot in @('apps', 'packages', 'services')) {
+    $workspaceParent = [IO.Path]::GetFullPath((Join-Path $resolvedRepositoryRoot $workspaceRoot))
+    $workspaceParentRelative = [IO.Path]::GetRelativePath($resolvedRepositoryRoot, $workspaceParent)
+    if ($workspaceParentRelative.StartsWith('..', [StringComparison]::Ordinal) -or
+        [IO.Path]::IsPathRooted($workspaceParentRelative)) {
+      throw "Generated build output parent escaped the repository root: $workspaceParent"
+    }
+    $workspaceParentItem = Get-Item -LiteralPath $workspaceParent -Force
+    if (($workspaceParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Generated build output parent cannot be a reparse point: $workspaceParent"
+    }
+
+    foreach ($workspace in @(Get-ChildItem -LiteralPath $workspaceParent -Directory -Force)) {
+      if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Generated build output workspace cannot be a reparse point: $($workspace.FullName)"
+      }
+      if (-not (Test-Path -LiteralPath (Join-Path $workspace.FullName 'package.json') -PathType Leaf)) {
+        continue
+      }
+
+      $distRoot = [IO.Path]::GetFullPath((Join-Path $workspace.FullName 'dist'))
+      $distRelative = [IO.Path]::GetRelativePath($resolvedRepositoryRoot, $distRoot).Replace('\', '/')
+      if ($distRelative.StartsWith('../', [StringComparison]::Ordinal) -or
+          [IO.Path]::IsPathRooted($distRelative) -or
+          -not $distRelative.EndsWith('/dist', [StringComparison]::Ordinal)) {
+        throw "Generated build output escaped its reviewed workspace: $distRoot"
+      }
+      if (-not (Test-Path -LiteralPath $distRoot)) {
+        continue
+      }
+
+      $distItem = Get-Item -LiteralPath $distRoot -Force
+      if (($distItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Generated build output cannot be a reparse point: $distRoot"
+      }
+      $nestedReparsePoint = @(
+        Get-ChildItem -LiteralPath $distRoot -Recurse -Force |
+          Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+          Select-Object -First 1
+      )
+      if ($nestedReparsePoint.Count -ne 0) {
+        throw "Generated build output cannot contain reparse points: $($nestedReparsePoint[0].FullName)"
+      }
+      Remove-Item -LiteralPath $distRoot -Recurse -Force
+    }
+  }
+}
+
 function Add-PayloadFile {
   param(
     [Parameter(Mandatory = $true)][System.Collections.Generic.Dictionary[string,string]]$Files,
@@ -64,14 +131,7 @@ function Add-PayloadTree {
 }
 
 $resolvedRepositoryRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path.TrimEnd('\', '/')
-$actualSha = ([string](Invoke-Git -Arguments @('rev-parse', 'HEAD') | Select-Object -First 1)).Trim()
-if ($actualSha -cne $CommitSha) {
-  throw "Repository HEAD $actualSha does not match release SHA $CommitSha."
-}
-$repositoryChanges = @(Invoke-Git -Arguments @('status', '--porcelain', '--untracked-files=all'))
-if ($repositoryChanges.Count -ne 0) {
-  throw "Tracked or untracked repository changes are forbidden while packaging a release."
-}
+Assert-RepositoryReleaseState -ExpectedSha $CommitSha
 
 . (Join-Path $resolvedRepositoryRoot 'scripts\deployment\Deployment.Common.ps1')
 $expectedNodeVersion = 'v22.23.2'
@@ -97,10 +157,18 @@ $checksumTemporaryPath = "$checksumPath.$transactionId.tmp"
 
 try {
   [void](New-Item -ItemType Directory -Path $bundleGenerationRoot)
+  Clear-GeneratedBuildOutputs
   Write-Host "[release-artifact:source-build-start] commitSha=$CommitSha nodeVersion=$nodeVersion"
-  & npm run build --silent
-  if ($LASTEXITCODE -ne 0) {
-    throw "Release packaging source build failed with exit code $LASTEXITCODE."
+  Push-Location -LiteralPath $resolvedRepositoryRoot
+  try {
+    & npm run build:release --silent
+    $sourceBuildExitCode = $LASTEXITCODE
+  }
+  finally {
+    Pop-Location
+  }
+  if ($sourceBuildExitCode -ne 0) {
+    throw "Release packaging source build failed with exit code $sourceBuildExitCode."
   }
   Write-Host "[release-artifact:source-build-complete] commitSha=$CommitSha"
   Copy-Item `
@@ -113,6 +181,7 @@ try {
     throw "Private bundled-runtime generation failed with exit code $LASTEXITCODE."
   }
   [void](Read-BundledRuntimeBuildReceipt -ReleaseRoot $bundleGenerationRoot)
+  Assert-RepositoryReleaseState -ExpectedSha $CommitSha
 
   $files = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
   foreach ($rootFile in @('.npmrc', 'package.json', 'package-lock.json')) {
