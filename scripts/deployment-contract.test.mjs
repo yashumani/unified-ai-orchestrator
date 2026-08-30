@@ -135,8 +135,9 @@ describe("Windows local-production deployment contract", () => {
     ]) {
       expect(writer).toContain(graphBinding);
     }
-    expect(writer).toContain("schemaVersion = 4");
-    expect(writer).toContain("schemaVersion = 2");
+    expect(writer).toContain("schemaVersion = 5");
+    expect(writer).toContain("schemaVersion = 3");
+    expect(writer).toContain("aclProtectionKind = $script:RuntimeAttestationAclProtectionKind");
     expect(writer).toContain("runtimeIntegritySha256 = $receiptSha256");
     expect(writer).toContain("dependencyGraphSha256 = [string]$graph.dependencyGraphSha256");
     expect(writer).toContain("releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256");
@@ -258,8 +259,12 @@ describe("Windows local-production deployment contract", () => {
     expect(sealed).toContain("attestationKind");
     expect(sealed).toContain("releaseManifestSha256");
     expect(sealed).toContain("legacyReceipt");
+    expect(sealed).toContain("explicitAclReceipt");
+    expect(sealed).toContain("receipt.schemaVersion -notin @(4, 5)");
     expect(sealed).toContain("seal.schemaVersion -ne 1");
     expect(sealed).toContain("seal.schemaVersion -ne 2");
+    expect(sealed).toContain("seal.schemaVersion -ne 3");
+    expect(sealed).toContain("Explicit-entry runtime dependency attestation seal");
     expect(boundedAcl).not.toMatch(/Get-ChildItem[^\n]*-Recurse/u);
     expect(boundedAcl).not.toContain("-Recursive");
     expect(boundedAcl).not.toMatch(/\/(?:T|verify)\b/iu);
@@ -284,17 +289,22 @@ describe("Windows local-production deployment contract", () => {
     expect(criticalPaths).toContain("WorkspaceLinks.links");
     expect(criticalPaths).toContain("linkFullPath");
     expect(criticalPaths).toContain("targetFullPath");
-    expect(protectRelease).toContain("(OI)(CI)");
+    expect(protectRelease).toContain("Invoke-ReleaseTreeAclProtectionProcess");
     expect(protectRelease).toContain("Assert-BoundedReleaseDirectoryProtection");
-    expect(protectRelease).toContain("RuntimeAttestationProtectionTimeoutSeconds");
-    expect(common).toContain("$script:RuntimeAttestationProtectionTimeoutSeconds = 30");
+    expect(protectRelease).toContain("RuntimeAttestationReleaseProtectionTimeoutSeconds");
+    expect(common).toContain("$script:RuntimeAttestationReleaseProtectionTimeoutSeconds = 1800");
+    expect(common).toContain("$script:RuntimeAttestationSealProtectionTimeoutSeconds = 30");
+    expect(protectRelease).not.toContain("CanonicalIcaclsPath");
+    expect(protectRelease).not.toContain("(OI)(CI)");
+    expect(protectRelease).not.toContain('"/grant:r"');
     expect(protectRelease).not.toMatch(/\/(?:reset|T|verify)\b/iu);
     expect(protectRelease).not.toMatch(/Get-ChildItem[^\n]*-Recurse/u);
 
     expect(fullAudit).toContain("Test-SealedRuntimeDependencyAttestation");
     expect(fullAudit).toContain("Get-RuntimeDependencyTreeReceipt");
     expect(fullAudit).toContain("Assert-ReleaseDirectoryProtection");
-    expect(fullAudit).toContain("Schema 4 full audit requires an externally trusted expected tree SHA-256");
+    expect(fullAudit).toContain("receipt.schemaVersion -in @(4, 5)");
+    expect(fullAudit).toContain("Bounded-graph full audit requires an externally trusted expected tree SHA-256");
     expect(compatibility).toContain("ExpectedTreeSha256");
     expect(compatibility).toContain("Test-RuntimeDependencyIntegrityFullAudit");
     expect(await deploymentScript("Test-LocalRelease.ps1")).toContain(
@@ -303,6 +313,96 @@ describe("Windows local-production deployment contract", () => {
     expect(await deploymentScript("Test-LocalRelease.ps1")).not.toContain(
       "FullAudit requires an externally trusted"
     );
+  });
+
+  it("protects every release entry with a bounded depth-descending ACL worker before protecting the root", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const worker = powershellFunction(common, "Invoke-ReleaseTreeAclWorker");
+    const boundedWorker = powershellFunction(common, "Invoke-ReleaseTreeAclProtectionProcess");
+    const protectedAcl = powershellFunction(common, "Assert-ProtectedAclContract");
+    const inventory = powershellFunction(common, "Get-ReleaseAclInventory");
+
+    expect(common).toContain("[switch]$ReleaseAclWorker");
+    expect(common).toContain("if ($ReleaseAclWorker)");
+    expect(common).toContain("Invoke-ReleaseTreeAclWorker");
+    expect(boundedWorker).toContain("Invoke-BoundedProcess");
+    expect(boundedWorker).toContain('"-ReleaseAclWorker"');
+    expect(boundedWorker).toContain("-IdleTimeoutSeconds 60");
+    expect(boundedWorker).toContain("-TimeoutSeconds $TimeoutSeconds");
+    expect(boundedWorker).toContain("-EchoOutput");
+    expect(boundedWorker).toContain("Explicit-entry release ACL protection");
+
+    expect(worker).toContain('Expression = "depth"; Descending = $true');
+    expect(worker).toContain("Group-Object depth");
+    expect(worker).toContain("$offset += 512");
+    expect(worker).toContain("[Math]::Min(512");
+    expect(worker).toContain("SetAndVerifyBatch");
+    expect(worker).toContain("$batchStableIds");
+    expect(worker).toContain("OpenRootGuard");
+    expect(worker).toContain("$rootGuard.Dispose()");
+    expect(worker).toContain('Join-Path $deploymentRoot "releases"');
+    expect(worker).toContain('Join-Path $deploymentRoot "staging"');
+    expect(worker).toContain('Join-Path $deploymentRoot "failed"');
+    expect(worker).toContain("root must be a direct child");
+    expect(worker).toContain("root name does not match");
+    expect(worker).toContain("Set-ExplicitProtectedPathAcl");
+    expect(worker).toContain("-InheritToChildren");
+    expect(worker).not.toContain("CanonicalIcaclsPath");
+    expect(worker).not.toContain("(OI)(CI)");
+    expect(worker).not.toMatch(/\/(?:grant:r|T|reset|verify)\b/iu);
+
+    const inventoryBefore = worker.indexOf("-Phase before");
+    const protectionStart = worker.indexOf("[release-acl:protection-start]");
+    const batchProtection = worker.indexOf("SetAndVerifyBatch");
+    const rootProtection = worker.indexOf("Set-ExplicitProtectedPathAcl");
+    const inventoryAfter = worker.indexOf("-Phase after");
+    const digestComparison = worker.indexOf("after.inventorySha256");
+    const finalVerification = worker.indexOf("NativeReparsePointAcl]::VerifyBatch");
+    const completion = worker.indexOf("[release-acl:complete]");
+    expect(inventoryBefore).toBeGreaterThan(0);
+    expect(protectionStart).toBeGreaterThan(inventoryBefore);
+    expect(batchProtection).toBeGreaterThan(protectionStart);
+    expect(rootProtection).toBeGreaterThan(batchProtection);
+    expect(inventoryAfter).toBeGreaterThan(rootProtection);
+    expect(digestComparison).toBeGreaterThan(inventoryAfter);
+    expect(finalVerification).toBeGreaterThan(digestComparison);
+    expect(completion).toBeGreaterThan(finalVerification);
+    expect(worker).toContain("Release ACL inventory changed during protection");
+    expect(worker).toContain("[release-acl:root-protected]");
+    expect(worker).toContain("[release-acl:final-verification-complete]");
+    expect(inventory).toContain("NativeReparsePointAcl]::Inspect");
+    expect(inventory).toContain("stableId = $stableId");
+    expect(inventory).toContain("linkCount = $linkCount");
+    expect(inventory).toContain("workspace junction changed while its target was inspected");
+    expect(common).toContain("FileFlagOpenReparsePoint");
+    expect(common).toContain("Regular release files must have exactly one hard link");
+    expect(common).toContain("ACL target identity or type changed after inventory");
+    expect(protectedAcl).toContain('$DescendantAclMode -ceq "Explicit"');
+    expect(protectedAcl).toContain("NativeReparsePointAcl]::Verify");
+    expect(protectedAcl).toContain("unsupported reparse point");
+  });
+
+  it("keeps receipt and seal compatibility while bounding interrupted-seal recovery", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const writer = powershellFunction(common, "Write-SealedRuntimeDependencyAttestation");
+    const sealed = powershellFunction(common, "Test-SealedRuntimeDependencyAttestation");
+    const recovery = powershellFunction(common, "Recover-InterruptedReleaseInstallation");
+
+    expect(writer).toContain("schemaVersion = 5");
+    expect(writer).toContain("schemaVersion = 3");
+    expect(writer).toContain("aclProtectionKind = $script:RuntimeAttestationAclProtectionKind");
+    expect(sealed).toContain("$legacyReceipt = [int]$receipt.schemaVersion -eq 3");
+    expect(sealed).toContain("$explicitAclReceipt = [int]$receipt.schemaVersion -eq 5");
+    expect(sealed).toContain("receipt.schemaVersion -notin @(4, 5)");
+    expect(sealed).toContain("seal.schemaVersion -ne 1");
+    expect(sealed).toContain("seal.schemaVersion -ne 2");
+    expect(sealed).toContain("seal.schemaVersion -ne 3");
+
+    expect(recovery).toContain("Invoke-BoundedProcess");
+    expect(recovery).toContain("RuntimeAttestationSealProtectionTimeoutSeconds");
+    expect(recovery).toContain('Context "Interrupted runtime seal recovery"');
+    expect(recovery).toContain("sealRecoveryAcl.exitCode");
+    expect(recovery).not.toContain("RuntimeAttestationReleaseProtectionTimeoutSeconds");
   });
 
   it("quarantines interrupted installs with a same-volume non-traversing move", async () => {
