@@ -1,7 +1,17 @@
 #requires -Version 7.4
 
+param(
+  [switch]$ReleaseAclWorker,
+  [string]$ReleaseAclContainmentRoot,
+  [string]$ReleaseAclRoot,
+  [string]$ReleaseAclIdentitySid,
+  [string]$ReleaseAclAllowedReparsePathsBase64
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$script:DeploymentCommonPath = $PSCommandPath
 
 $script:CanonicalRepositoryRoot = "D:\Yashu-AI-Workspace\unified-ai-orchestrator"
 $script:CanonicalHealthUri = "http://127.0.0.1:8790/api/ready"
@@ -25,7 +35,10 @@ $script:PinnedNodeArchiveUrl = "https://nodejs.org/dist/v22.23.2/node-v22.23.2-w
 $script:ShaPattern = "^[0-9a-f]{40}$"
 $script:RuntimeAttestationKind = "npm-lock-graph-v1"
 $script:RuntimeAttestationGraphTimeoutSeconds = 120
-$script:RuntimeAttestationProtectionTimeoutSeconds = 30
+$script:RuntimeAttestationReleaseProtectionTimeoutSeconds = 1800
+$script:RuntimeAttestationSealProtectionTimeoutSeconds = 30
+$script:RuntimeAttestationAclProtectionKind = "explicit-entry-dacl-v1"
+$script:RuntimeAttestationMaximumAclEntries = 300000
 $script:CriticalReleasePayloadPaths = @(
   "package.json",
   "package-lock.json",
@@ -293,9 +306,11 @@ function Invoke-BoundedProcess {
     [Parameter(Mandatory)][string]$FilePath,
     [Parameter(Mandatory)][string[]]$ArgumentList,
     [Parameter(Mandatory)][string]$WorkingDirectory,
-    [Parameter(Mandatory)][ValidateRange(1, 300)][int]$TimeoutSeconds,
+    [Parameter(Mandatory)][ValidateRange(1, 1800)][int]$TimeoutSeconds,
     [Parameter(Mandatory)][ValidateRange(1024, 16777216)][int]$MaxOutputCharacters,
-    [Parameter(Mandatory)][string]$Context
+    [Parameter(Mandatory)][string]$Context,
+    [ValidateRange(0, 300)][int]$IdleTimeoutSeconds = 0,
+    [switch]$EchoOutput
   )
 
   $resolvedFile = [System.IO.Path]::GetFullPath($FilePath)
@@ -361,10 +376,16 @@ function Invoke-BoundedProcess {
     $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
     $stdoutDone = $false
     $stderrDone = $false
+    $lastOutputMilliseconds = [int64]0
     while (-not ($stdoutDone -and $stderrDone -and $process.HasExited)) {
       if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
         & $stopProcessTree
         throw "$Context exceeded its $TimeoutSeconds-second bound."
+      }
+      if ($IdleTimeoutSeconds -gt 0 -and
+          ($timer.ElapsedMilliseconds - $lastOutputMilliseconds) -ge ($IdleTimeoutSeconds * 1000)) {
+        & $stopProcessTree
+        throw "$Context made no observable progress for $IdleTimeoutSeconds seconds."
       }
       $madeProgress = $false
       if (-not $stdoutDone -and $stdoutRead.IsCompleted) {
@@ -378,6 +399,10 @@ function Invoke-BoundedProcess {
             throw "$Context combined output exceeded its reviewed bound."
           }
           [void]$stdoutBuilder.Append($stdoutBuffer, 0, $count)
+          $lastOutputMilliseconds = [int64]$timer.ElapsedMilliseconds
+          if ($EchoOutput) {
+            Write-Host -NoNewline ([string]::new($stdoutBuffer, 0, $count))
+          }
           $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
         }
       }
@@ -392,6 +417,10 @@ function Invoke-BoundedProcess {
             throw "$Context combined output exceeded its reviewed bound."
           }
           [void]$stderrBuilder.Append($stderrBuffer, 0, $count)
+          $lastOutputMilliseconds = [int64]$timer.ElapsedMilliseconds
+          if ($EchoOutput) {
+            Write-Host -NoNewline ([string]::new($stderrBuffer, 0, $count))
+          }
           $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
         }
       }
@@ -1929,8 +1958,9 @@ function Write-SealedRuntimeDependencyAttestation {
   }
   $identity = Get-CurrentWindowsIdentityReceipt
   $receipt = [ordered]@{
-    schemaVersion = 4
+    schemaVersion = 5
     attestationKind = $script:RuntimeAttestationKind
+    aclProtectionKind = $script:RuntimeAttestationAclProtectionKind
     commitSha = $ExpectedSha
     releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256
     packageLockSha256 = [string]$criticalPayload.packageLockSha256
@@ -1969,16 +1999,20 @@ function Write-SealedRuntimeDependencyAttestation {
       -ReleaseRoot $ReleaseRoot `
       -WorkspaceLinks $workspaceLinks `
       -IncludeHiddenPackageLock:($null -ne $hiddenPackageLockSha256))
-  Write-Host "[runtime-attestation:release-protection-start] timeoutSeconds=$script:RuntimeAttestationProtectionTimeoutSeconds"
-  Protect-ReleaseDirectory `
+  Write-Host "[runtime-attestation:release-protection-start] timeoutSeconds=$script:RuntimeAttestationReleaseProtectionTimeoutSeconds mode=$script:RuntimeAttestationAclProtectionKind"
+  $protectionTimer = [System.Diagnostics.Stopwatch]::StartNew()
+  $protection = Protect-ReleaseDirectory `
     -Layout $Layout `
     -ReleaseRoot $ReleaseRoot `
     -IdentitySid ([string]$identity.identitySid) `
-    -CriticalPaths $criticalPaths
-  Write-Host "[runtime-attestation:release-protection-complete]"
+    -CriticalPaths $criticalPaths `
+    -WorkspaceLinks @($workspaceLinks.links)
+  $protectionTimer.Stop()
+  Write-Host "[runtime-attestation:release-protection-complete] elapsedMilliseconds=$($protectionTimer.ElapsedMilliseconds) entries=$($protection.entryCount) inventorySha256=$($protection.inventorySha256)"
   Write-AtomicJson -Layout $Layout -Path $sealPath -Value ([ordered]@{
-      schemaVersion = 2
+      schemaVersion = 3
       attestationKind = $script:RuntimeAttestationKind
+      aclProtectionKind = $script:RuntimeAttestationAclProtectionKind
       commitSha = $ExpectedSha
       runtimeIntegritySha256 = $receiptSha256
       dependencyGraphSha256 = [string]$graph.dependencyGraphSha256
@@ -1996,7 +2030,7 @@ function Write-SealedRuntimeDependencyAttestation {
       "/Q"
     ) `
     -WorkingDirectory $Layout.RuntimeIntegrity `
-    -TimeoutSeconds $script:RuntimeAttestationProtectionTimeoutSeconds `
+    -TimeoutSeconds $script:RuntimeAttestationSealProtectionTimeoutSeconds `
     -MaxOutputCharacters 1048576 `
     -Context "Runtime dependency attestation seal protection"
   if ([int]$sealAcl.exitCode -ne 0) {
@@ -2046,6 +2080,7 @@ function Test-SealedRuntimeDependencyAttestation {
   $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
   $receipt = Read-JsonHashtable -Path $receiptPath
   $legacyReceipt = [int]$receipt.schemaVersion -eq 3
+  $explicitAclReceipt = [int]$receipt.schemaVersion -eq 5
   if ($legacyReceipt) {
     $requiredKeys = @(
       "schemaVersion", "commitSha", "packageLockSha256", "nodePath", "nodeVersion",
@@ -2069,10 +2104,15 @@ function Test-SealedRuntimeDependencyAttestation {
       "nodeRuntimeTreeSha256", "identityName", "identitySid", "dependencyGraphNodeCount",
       "dependencyGraphSha256", "workspaceLinkCount"
     )
+    if ($explicitAclReceipt) {
+      $requiredKeys += "aclProtectionKind"
+    }
     if (@($receipt.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
         @($requiredKeys | Where-Object { $_ -notin $receipt.Keys }).Count -ne 0 -or
-        [int]$receipt.schemaVersion -ne 4 -or
+        [int]$receipt.schemaVersion -notin @(4, 5) -or
         [string]$receipt.attestationKind -cne $script:RuntimeAttestationKind -or
+        ($explicitAclReceipt -and
+          [string]$receipt.aclProtectionKind -cne $script:RuntimeAttestationAclProtectionKind) -or
         [string]$receipt.releaseManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
         $receipt.criticalPayloadSha256 -isnot [System.Collections.IDictionary] -or
         [string]$receipt.npmVersion -cne "10.9.8" -or
@@ -2128,6 +2168,23 @@ function Test-SealedRuntimeDependencyAttestation {
         [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
         [string]$seal.treeSha256 -cne [string]$receipt.treeSha256) {
       throw "Legacy external runtime dependency seal does not match the immutable release receipt."
+    }
+  } elseif ($explicitAclReceipt) {
+    $sealKeys = @(
+      "schemaVersion", "attestationKind", "aclProtectionKind", "commitSha",
+      "runtimeIntegritySha256", "dependencyGraphSha256", "releaseManifestSha256",
+      "createdAtUtc"
+    )
+    if (@($seal.Keys | Where-Object { $_ -notin $sealKeys }).Count -ne 0 -or
+        @($sealKeys | Where-Object { $_ -notin $seal.Keys }).Count -ne 0 -or
+        [int]$seal.schemaVersion -ne 3 -or
+        [string]$seal.attestationKind -cne $script:RuntimeAttestationKind -or
+        [string]$seal.aclProtectionKind -cne $script:RuntimeAttestationAclProtectionKind -or
+        [string]$seal.commitSha -cne $ExpectedSha -or
+        [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
+        [string]$seal.dependencyGraphSha256 -cne [string]$receipt.dependencyGraphSha256 -or
+        [string]$seal.releaseManifestSha256 -cne [string]$receipt.releaseManifestSha256) {
+      throw "Explicit-entry runtime dependency attestation seal does not match the immutable release receipt."
     }
   } else {
     $sealKeys = @(
@@ -2198,7 +2255,8 @@ function Test-SealedRuntimeDependencyAttestation {
       -Layout $Layout `
       -ReleaseRoot $ReleaseRoot `
       -IdentitySid ([string]$receipt.identitySid) `
-      -CriticalPaths $criticalPaths)
+      -CriticalPaths $criticalPaths `
+      -DescendantAclMode $(if ($explicitAclReceipt) { "Explicit" } else { "Inherited" }))
   if ($legacyReceipt) {
     $receipt["attestationKind"] = "legacy-full-tree-sha256"
   }
@@ -2226,9 +2284,9 @@ function Test-RuntimeDependencyIntegrityFullAudit {
       $ExpectedTreeSha256 -cnotmatch "^[0-9a-f]{64}$") {
     throw "Expected full-audit tree SHA-256 is invalid."
   }
-  if ([int]$receipt.schemaVersion -eq 4 -and
+  if ([int]$receipt.schemaVersion -in @(4, 5) -and
       [string]::IsNullOrWhiteSpace($ExpectedTreeSha256)) {
-    throw "Schema 4 full audit requires an externally trusted expected tree SHA-256."
+    throw "Bounded-graph full audit requires an externally trusted expected tree SHA-256."
   }
   [void](Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha)
   $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $Layout
@@ -2253,7 +2311,8 @@ function Test-RuntimeDependencyIntegrityFullAudit {
   [void](Assert-ReleaseDirectoryProtection `
       -Layout $Layout `
       -ReleaseRoot $ReleaseRoot `
-      -IdentitySid ([string]$receipt.identitySid))
+      -IdentitySid ([string]$receipt.identitySid) `
+      -DescendantAclMode $(if ([int]$receipt.schemaVersion -eq 5) { "Explicit" } else { "Inherited" }))
   $receipt["attestationMode"] = "full-audit"
   $receipt["fullAuditEntryCount"] = [int]$tree.entryCount
   $receipt["fullAuditFileCount"] = [int]$tree.fileCount
@@ -2281,11 +2340,995 @@ function Test-RuntimeDependencyIntegrity {
       -ExpectedTreeSha256 $ExpectedTreeSha256)
 }
 
+function Initialize-NativeReparsePointAcl {
+  if ("UnifiedAiOrchestratorDeployment.NativeReparsePointAcl" -as [type]) {
+    return
+  }
+  Add-Type -TypeDefinition @'
+using Microsoft.Win32.SafeHandles;
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Threading.Tasks;
+
+namespace UnifiedAiOrchestratorDeployment
+{
+    public static class NativeReparsePointAcl
+    {
+        private const uint ReadControl = 0x00020000;
+        private const uint WriteDac = 0x00040000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint DaclSecurityInformation = 0x00000004;
+        private const uint ProtectedDaclSecurityInformation = 0x80000000;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+        private const uint IoReparseTagMountPoint = 0xA0000003;
+        private const int FileAttributeTagInfoClass = 9;
+        private const int ErrorInsufficientBuffer = 122;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeFileTime
+        {
+            public uint LowDateTime;
+            public uint HighDateTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public NativeFileTime CreationTime;
+            public NativeFileTime LastAccessTime;
+            public NativeFileTime LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileAttributeTagInformation
+        {
+            public uint FileAttributes;
+            public uint ReparseTag;
+        }
+
+        public sealed class PathIdentity
+        {
+            internal PathIdentity(
+                string stableId,
+                bool isDirectory,
+                bool isReparsePoint,
+                uint reparseTag,
+                uint linkCount)
+            {
+                StableId = stableId;
+                IsDirectory = isDirectory;
+                IsReparsePoint = isReparsePoint;
+                ReparseTag = reparseTag;
+                LinkCount = linkCount;
+            }
+
+            public string StableId { get; }
+            public bool IsDirectory { get; }
+            public bool IsReparsePoint { get; }
+            public uint ReparseTag { get; }
+            public uint LinkCount { get; }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle handle,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandleEx(
+            SafeFileHandle handle,
+            int fileInformationClass,
+            out FileAttributeTagInformation fileInformation,
+            uint bufferSize);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetKernelObjectSecurity(
+            SafeFileHandle handle,
+            uint securityInformation,
+            byte[] securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetKernelObjectSecurity(
+            SafeFileHandle handle,
+            uint requestedInformation,
+            byte[] securityDescriptor,
+            uint length,
+            out uint lengthNeeded);
+
+        public static void SetAndVerify(string path, string identitySid)
+        {
+            var expected = Inspect(path);
+            SetAndVerifyPath(
+                path,
+                identitySid,
+                expected.IsDirectory,
+                expected.IsReparsePoint,
+                false,
+                expected.StableId);
+        }
+
+        public static PathIdentity Inspect(string path)
+        {
+            using var handle = Open(path, ReadControl, true);
+            return ReadAndValidateIdentity(handle);
+        }
+
+        public static SafeFileHandle OpenRootGuard(string path, string expectedStableId)
+        {
+            var handle = Open(path, ReadControl, false);
+            try
+            {
+                ValidateExpectedIdentity(
+                    ReadAndValidateIdentity(handle),
+                    expectedStableId,
+                    true,
+                    false);
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        public static void SetAndVerifyPath(
+            string path,
+            string identitySid,
+            bool isDirectory,
+            bool isReparsePoint,
+            bool inheritToChildren,
+            string expectedStableId)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("ACL path is required.", nameof(path));
+            if (string.IsNullOrWhiteSpace(expectedStableId))
+                throw new ArgumentException("Stable ACL identity is required.", nameof(expectedStableId));
+            if (inheritToChildren && (!isDirectory || isReparsePoint))
+                throw new ArgumentException("Only a non-reparse directory can inherit to children.");
+            _ = new SecurityIdentifier(identitySid);
+            var inheritance = inheritToChildren ? "OICI" : string.Empty;
+            var desired = new RawSecurityDescriptor(
+                $"D:P(A;{inheritance};0x1200a9;;;{identitySid})(A;{inheritance};FA;;;SY)");
+            var desiredBytes = new byte[desired.BinaryLength];
+            desired.GetBinaryForm(desiredBytes, 0);
+
+            using var handle = Open(path, ReadControl | WriteDac, true);
+            ValidateExpectedIdentity(
+                ReadAndValidateIdentity(handle),
+                expectedStableId,
+                isDirectory,
+                isReparsePoint);
+            if (!SetKernelObjectSecurity(
+                    handle,
+                    DaclSecurityInformation | ProtectedDaclSecurityInformation,
+                    desiredBytes))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Unable to protect the reparse-point DACL.");
+
+            ValidateExpectedIdentity(
+                ReadAndValidateIdentity(handle),
+                expectedStableId,
+                isDirectory,
+                isReparsePoint);
+            VerifyDescriptor(ReadDescriptor(handle), identitySid, inheritToChildren);
+        }
+
+        public static void SetAndVerifyBatch(
+            string[] paths,
+            bool[] isDirectories,
+            bool[] isReparsePoints,
+            string[] expectedStableIds,
+            string identitySid,
+            int maximumDegreeOfParallelism)
+        {
+            if (paths == null || isDirectories == null || isReparsePoints == null ||
+                expectedStableIds == null ||
+                paths.Length < 1 || paths.Length > 512 ||
+                paths.Length != isDirectories.Length ||
+                paths.Length != isReparsePoints.Length ||
+                paths.Length != expectedStableIds.Length)
+                throw new ArgumentException("ACL batch arrays must have the same reviewed 1-512 length.");
+            if (maximumDegreeOfParallelism < 1 || maximumDegreeOfParallelism > 8)
+                throw new ArgumentOutOfRangeException(nameof(maximumDegreeOfParallelism));
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maximumDegreeOfParallelism
+            };
+            Parallel.For(0, paths.Length, options, index =>
+            {
+                try
+                {
+                    SetAndVerifyPath(
+                        paths[index],
+                        identitySid,
+                        isDirectories[index],
+                        isReparsePoints[index],
+                        isDirectories[index] && !isReparsePoints[index],
+                        expectedStableIds[index]);
+                }
+                catch (Exception error)
+                {
+                    throw new InvalidOperationException(
+                        $"ACL batch entry failed at {paths[index]}: {error.Message}",
+                        error);
+                }
+            });
+        }
+
+        public static void Verify(string path, string identitySid)
+        {
+            var expected = Inspect(path);
+            if (!expected.IsDirectory || !expected.IsReparsePoint ||
+                expected.ReparseTag != IoReparseTagMountPoint)
+                throw new InvalidOperationException("ACL target is not a directory junction.");
+            VerifyExactPath(path, identitySid, true, true, false, expected.StableId);
+        }
+
+        public static void VerifyExactPath(
+            string path,
+            string identitySid,
+            bool isDirectory,
+            bool isReparsePoint,
+            bool inheritToChildren,
+            string expectedStableId)
+        {
+            _ = new SecurityIdentifier(identitySid);
+            using var handle = Open(path, ReadControl, true);
+            ValidateExpectedIdentity(
+                ReadAndValidateIdentity(handle),
+                expectedStableId,
+                isDirectory,
+                isReparsePoint);
+            VerifyDescriptor(ReadDescriptor(handle), identitySid, inheritToChildren);
+        }
+
+        public static void VerifyBatch(
+            string[] paths,
+            bool[] isDirectories,
+            bool[] isReparsePoints,
+            string[] expectedStableIds,
+            string identitySid,
+            int maximumDegreeOfParallelism)
+        {
+            if (paths == null || isDirectories == null || isReparsePoints == null ||
+                expectedStableIds == null ||
+                paths.Length < 1 || paths.Length > 512 ||
+                paths.Length != isDirectories.Length ||
+                paths.Length != isReparsePoints.Length ||
+                paths.Length != expectedStableIds.Length)
+                throw new ArgumentException("ACL verification arrays must have the same reviewed 1-512 length.");
+            if (maximumDegreeOfParallelism < 1 || maximumDegreeOfParallelism > 8)
+                throw new ArgumentOutOfRangeException(nameof(maximumDegreeOfParallelism));
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maximumDegreeOfParallelism
+            };
+            Parallel.For(0, paths.Length, options, index =>
+            {
+                try
+                {
+                    VerifyExactPath(
+                        paths[index],
+                        identitySid,
+                        isDirectories[index],
+                        isReparsePoints[index],
+                        isDirectories[index] && !isReparsePoints[index],
+                        expectedStableIds[index]);
+                }
+                catch (Exception error)
+                {
+                    throw new InvalidOperationException(
+                        $"Final ACL verification failed at {paths[index]}: {error.Message}",
+                        error);
+                }
+            });
+        }
+
+        private static SafeFileHandle Open(
+            string path,
+            uint desiredAccess,
+            bool shareDelete)
+        {
+            var shareMode = FileShareRead | FileShareWrite;
+            if (shareDelete)
+                shareMode |= FileShareDelete;
+            var handle = CreateFileW(
+                ToExtendedPath(path),
+                desiredAccess,
+                shareMode,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new Win32Exception(error, $"Unable to open ACL target (Win32 error {error}).");
+            }
+            return handle;
+        }
+
+        private static PathIdentity ReadAndValidateIdentity(SafeFileHandle handle)
+        {
+            if (!GetFileInformationByHandle(handle, out var fileInformation))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Unable to read the ACL target file identity.");
+            if (!GetFileInformationByHandleEx(
+                    handle,
+                    FileAttributeTagInfoClass,
+                    out var tagInformation,
+                    (uint)Marshal.SizeOf<FileAttributeTagInformation>()))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Unable to read the ACL target reparse identity.");
+            var identityAttributes = fileInformation.FileAttributes &
+                (FileAttributeDirectory | FileAttributeReparsePoint);
+            var tagAttributes = tagInformation.FileAttributes &
+                (FileAttributeDirectory | FileAttributeReparsePoint);
+            if (identityAttributes != tagAttributes)
+                throw new InvalidOperationException("ACL target attributes changed while its handle was open.");
+            var isDirectory = (identityAttributes & FileAttributeDirectory) != 0;
+            var isReparsePoint = (identityAttributes & FileAttributeReparsePoint) != 0;
+            var reparseTag = isReparsePoint ? tagInformation.ReparseTag : 0;
+            if (isReparsePoint && (!isDirectory || reparseTag != IoReparseTagMountPoint))
+                throw new InvalidOperationException("ACL target is an unsupported reparse point.");
+            if (!isDirectory && !isReparsePoint && fileInformation.NumberOfLinks != 1)
+                throw new InvalidOperationException("Regular release files must have exactly one hard link.");
+            var fileIndex = ((ulong)fileInformation.FileIndexHigh << 32) |
+                fileInformation.FileIndexLow;
+            var stableId = $"{fileInformation.VolumeSerialNumber:x8}:{fileIndex:x16}";
+            return new PathIdentity(
+                stableId,
+                isDirectory,
+                isReparsePoint,
+                reparseTag,
+                fileInformation.NumberOfLinks);
+        }
+
+        private static void ValidateExpectedIdentity(
+            PathIdentity observed,
+            string expectedStableId,
+            bool expectedDirectory,
+            bool expectedReparsePoint)
+        {
+            if (!string.Equals(observed.StableId, expectedStableId, StringComparison.Ordinal) ||
+                observed.IsDirectory != expectedDirectory ||
+                observed.IsReparsePoint != expectedReparsePoint)
+                throw new InvalidOperationException("ACL target identity or type changed after inventory.");
+        }
+
+        private static string ToExtendedPath(string path)
+        {
+            var fullPath = System.IO.Path.GetFullPath(path);
+            if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal))
+                return fullPath;
+            if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+                return @"\\?\UNC\" + fullPath.Substring(2);
+            return @"\\?\" + fullPath;
+        }
+
+        private static RawSecurityDescriptor ReadDescriptor(SafeFileHandle handle)
+        {
+            GetKernelObjectSecurity(handle, DaclSecurityInformation, null, 0, out var needed);
+            var firstError = Marshal.GetLastWin32Error();
+            if (needed == 0 || firstError != ErrorInsufficientBuffer)
+                throw new Win32Exception(firstError, "Unable to size the reparse-point security descriptor.");
+            var buffer = new byte[needed];
+            if (!GetKernelObjectSecurity(
+                    handle,
+                    DaclSecurityInformation,
+                    buffer,
+                    (uint)buffer.Length,
+                    out needed))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Unable to read the reparse-point security descriptor.");
+            return new RawSecurityDescriptor(buffer, 0);
+        }
+
+        private static void VerifyDescriptor(
+            RawSecurityDescriptor descriptor,
+            string identitySid,
+            bool inheritToChildren)
+        {
+            if ((descriptor.ControlFlags & ControlFlags.DiscretionaryAclProtected) == 0 ||
+                descriptor.DiscretionaryAcl == null ||
+                descriptor.DiscretionaryAcl.Count != 2)
+                throw new InvalidOperationException("Reparse-point DACL is not an exact protected two-ACE contract.");
+
+            var userSeen = false;
+            var systemSeen = false;
+            var readExecute = (int)(FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize);
+            var fullControl = (int)FileSystemRights.FullControl;
+            var inheritanceMask = AceFlags.ContainerInherit | AceFlags.ObjectInherit |
+                                  AceFlags.InheritOnly | AceFlags.NoPropagateInherit;
+            var expectedInheritance = inheritToChildren
+                ? AceFlags.ContainerInherit | AceFlags.ObjectInherit
+                : AceFlags.None;
+            foreach (GenericAce genericAce in descriptor.DiscretionaryAcl)
+            {
+                if (genericAce is not CommonAce ace ||
+                    ace.AceQualifier != AceQualifier.AccessAllowed ||
+                    (ace.AceFlags & AceFlags.Inherited) != 0 ||
+                    (ace.AceFlags & inheritanceMask) != expectedInheritance)
+                    throw new InvalidOperationException("Protected DACL contains an unexpected ACE.");
+                var sid = ace.SecurityIdentifier.Value;
+                if (string.Equals(sid, identitySid, StringComparison.Ordinal))
+                {
+                    if (userSeen || ace.AccessMask != readExecute)
+                        throw new InvalidOperationException("Protected DACL runtime identity rights are invalid.");
+                    userSeen = true;
+                }
+                else if (string.Equals(sid, "S-1-5-18", StringComparison.Ordinal))
+                {
+                    if (systemSeen || ace.AccessMask != fullControl)
+                        throw new InvalidOperationException("Protected DACL LocalSystem rights are invalid.");
+                    systemSeen = true;
+                }
+                else
+                {
+                    throw new InvalidOperationException("Protected DACL contains an unexpected identity.");
+                }
+            }
+            if (!userSeen || !systemSeen)
+                throw new InvalidOperationException("Protected DACL is missing a required identity.");
+        }
+    }
+}
+'@
+}
+
+function New-ExplicitProtectedFileSystemAcl {
+  param(
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][bool]$IsDirectory,
+    [switch]$InheritToChildren
+  )
+
+  if ($IdentitySid -cnotmatch "^S-1-[0-9-]+$") {
+    throw "Explicit ACL identity SID is invalid."
+  }
+  if ($InheritToChildren -and -not $IsDirectory) {
+    throw "Only a directory ACL can inherit to children."
+  }
+  $security = if ($IsDirectory) {
+    [System.Security.AccessControl.DirectorySecurity]::new()
+  } else {
+    [System.Security.AccessControl.FileSecurity]::new()
+  }
+  $security.SetAccessRuleProtection($true, $false)
+  $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::None
+  if ($InheritToChildren) {
+    $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags](
+      [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+      [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+  }
+  $propagationFlags = [System.Security.AccessControl.PropagationFlags]::None
+  $allow = [System.Security.AccessControl.AccessControlType]::Allow
+  foreach ($rule in @(
+      [System.Security.AccessControl.FileSystemAccessRule]::new(
+        [System.Security.Principal.SecurityIdentifier]::new($IdentitySid),
+        [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $inheritanceFlags,
+        $propagationFlags,
+        $allow
+      ),
+      [System.Security.AccessControl.FileSystemAccessRule]::new(
+        [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18"),
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritanceFlags,
+        $propagationFlags,
+        $allow
+      )
+    )) {
+    [void]$security.AddAccessRule($rule)
+  }
+  return $security
+}
+
+function Assert-ExplicitProtectedPathAcl {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][bool]$IsDirectory,
+    [switch]$InheritToChildren
+  )
+
+  $item = if ($IsDirectory) {
+    [System.IO.DirectoryInfo]::new([System.IO.Path]::GetFullPath($Path))
+  } else {
+    [System.IO.FileInfo]::new([System.IO.Path]::GetFullPath($Path))
+  }
+  $security = if ($IsDirectory) {
+    [System.IO.FileSystemAclExtensions]::GetAccessControl(
+      [System.IO.DirectoryInfo]$item,
+      [System.Security.AccessControl.AccessControlSections]::Access
+    )
+  } else {
+    [System.IO.FileSystemAclExtensions]::GetAccessControl(
+      [System.IO.FileInfo]$item,
+      [System.Security.AccessControl.AccessControlSections]::Access
+    )
+  }
+  if (-not $security.AreAccessRulesProtected) {
+    throw "Explicit-entry DACL is not protected: $Path"
+  }
+  $rules = @($security.GetAccessRules(
+      $true,
+      $true,
+      [System.Security.Principal.SecurityIdentifier]
+    ))
+  if ($rules.Count -ne 2) {
+    throw "Explicit-entry DACL must contain exactly two ACEs: $Path"
+  }
+  $expectedInheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::None
+  if ($InheritToChildren) {
+    $expectedInheritanceFlags = [System.Security.AccessControl.InheritanceFlags](
+      [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+      [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+  }
+  $expectedSids = @($IdentitySid, "S-1-5-18")
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $expectedReadExecute = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+    [System.Security.AccessControl.FileSystemRights]::Synchronize
+  foreach ($rule in $rules) {
+    $sid = ([System.Security.Principal.SecurityIdentifier]$rule.IdentityReference).Value
+    if ([string]$rule.AccessControlType -cne "Allow" -or
+        [bool]$rule.IsInherited -or
+        $rule.InheritanceFlags -ne $expectedInheritanceFlags -or
+        $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
+        $sid -notin $expectedSids -or
+        -not $seen.Add($sid)) {
+      throw "Explicit-entry DACL contains an unexpected ACE: $Path"
+    }
+    $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+    if ($sid -ceq "S-1-5-18") {
+      if ($rights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+        throw "Explicit-entry DACL does not grant LocalSystem full control: $Path"
+      }
+    } elseif ($rights -ne $expectedReadExecute) {
+      throw "Explicit-entry DACL does not restrict the runtime identity to read and execute: $Path"
+    }
+  }
+  foreach ($sid in $expectedSids) {
+    if (-not $seen.Contains($sid)) {
+      throw "Explicit-entry DACL is missing required identity $sid at $Path."
+    }
+  }
+  return $true
+}
+
+function Set-ExplicitProtectedPathAcl {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][bool]$IsDirectory,
+    [Parameter(Mandatory)][string]$ExpectedStableId,
+    [switch]$IsReparsePoint,
+    [switch]$InheritToChildren
+  )
+
+  if ($IsReparsePoint -and (-not $IsDirectory -or $InheritToChildren)) {
+    throw "Only non-inheriting directory junction DACLs are supported."
+  }
+  Initialize-NativeReparsePointAcl
+  [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::SetAndVerifyPath(
+    [System.IO.Path]::GetFullPath($Path),
+    $IdentitySid,
+    $IsDirectory,
+    [bool]$IsReparsePoint,
+    [bool]$InheritToChildren,
+    $ExpectedStableId
+  )
+}
+
+function Get-ReleaseAclInventory {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$AllowedWorkspaceLinks,
+    [Parameter(Mandatory)][ValidateRange(1, 300000)][int]$MaximumEntries,
+    [Parameter(Mandatory)][ValidateSet("before", "after")][string]$Phase
+  )
+
+  $rootFull = [System.IO.Path]::GetFullPath($ReleaseRoot).TrimEnd("\")
+  Initialize-NativeReparsePointAcl
+  $rootItem = Get-Item -LiteralPath $rootFull -Force
+  if (-not $rootItem.PSIsContainer -or
+      ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Release ACL inventory root must be a non-reparse directory."
+  }
+  $options = [System.IO.EnumerationOptions]::new()
+  $options.RecurseSubdirectories = $false
+  $options.IgnoreInaccessible = $false
+  $options.AttributesToSkip = [System.IO.FileAttributes]0
+  $options.ReturnSpecialDirectories = $false
+  $pending = [System.Collections.Generic.Stack[object]]::new()
+  $pending.Push([pscustomobject]@{ directory = [System.IO.DirectoryInfo]::new($rootFull); depth = 0 })
+  $entries = [System.Collections.Generic.List[object]]::new()
+  $inventoryLines = [System.Collections.Generic.List[string]]::new()
+  $observedLinks = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  Write-Host "[release-acl:inventory-$Phase-start]"
+  while ($pending.Count -gt 0) {
+    $cursor = $pending.Pop()
+    foreach ($item in $cursor.directory.EnumerateFileSystemInfos("*", $options)) {
+      if ($entries.Count -ge $MaximumEntries) {
+        throw "Release ACL inventory exceeds the reviewed $MaximumEntries-entry limit."
+      }
+      $fullPath = [System.IO.Path]::GetFullPath($item.FullName)
+      if (-not $fullPath.StartsWith("$rootFull\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release ACL inventory escaped its root."
+      }
+      $relativePath = [System.IO.Path]::GetRelativePath($rootFull, $fullPath).Replace("\", "/")
+      if ($relativePath.Length -gt 32767 -or ($cursor.depth + 1) -gt 128) {
+        throw "Release ACL inventory path length or depth exceeds its reviewed limit."
+      }
+      $isDirectory = [bool](($item.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0)
+      $isReparsePoint = [bool](($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+      $nativeIdentity = [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Inspect($fullPath)
+      if ([bool]$nativeIdentity.IsDirectory -ne $isDirectory -or
+          [bool]$nativeIdentity.IsReparsePoint -ne $isReparsePoint) {
+        throw "Release ACL inventory path type changed while it was inspected: $relativePath"
+      }
+      $stableId = [string]$nativeIdentity.StableId
+      $linkCount = [uint32]$nativeIdentity.LinkCount
+      $reparseTag = [uint32]$nativeIdentity.ReparseTag
+      $linkTargetRelative = ""
+      if ($isReparsePoint) {
+        if (-not $isDirectory -or [string]$item.LinkType -cne "Junction" -or
+            -not $AllowedWorkspaceLinks.ContainsKey($relativePath)) {
+          throw "Release ACL inventory found an undeclared or unsupported reparse point: $relativePath"
+        }
+        $resolvedTarget = $item.ResolveLinkTarget($false)
+        if ($null -eq $resolvedTarget) {
+          throw "Release ACL inventory could not resolve workspace junction: $relativePath"
+        }
+        $targetFull = [System.IO.Path]::GetFullPath($resolvedTarget.FullName)
+        $linkTargetRelative = [string]$AllowedWorkspaceLinks[$relativePath]
+        $expectedTarget = [System.IO.Path]::GetFullPath((Join-Path $rootFull $linkTargetRelative))
+        if (-not [string]::Equals($targetFull, $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $targetFull.StartsWith("$rootFull\", [System.StringComparison]::OrdinalIgnoreCase)) {
+          throw "Release ACL inventory workspace junction target drifted: $relativePath"
+        }
+        $junctionIdentityAfterTargetRead = [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Inspect($fullPath)
+        if ([string]$junctionIdentityAfterTargetRead.StableId -cne $stableId -or
+            -not [bool]$junctionIdentityAfterTargetRead.IsDirectory -or
+            -not [bool]$junctionIdentityAfterTargetRead.IsReparsePoint) {
+          throw "Release ACL inventory workspace junction changed while its target was inspected: $relativePath"
+        }
+        [void]$observedLinks.Add($relativePath)
+      }
+      $entry = [pscustomobject]@{
+        path = $fullPath
+        relativePath = $relativePath
+        depth = [int]($cursor.depth + 1)
+        isDirectory = $isDirectory
+        isReparsePoint = $isReparsePoint
+        stableId = $stableId
+        linkCount = $linkCount
+        reparseTag = $reparseTag
+        linkTargetRelative = $linkTargetRelative
+      }
+      $entries.Add($entry)
+      $inventoryLines.Add("$relativePath`0$([int]$isDirectory)`0$([int]$isReparsePoint)`0$stableId`0$linkCount`0$reparseTag`0$linkTargetRelative")
+      if ($entries.Count % 1024 -eq 0) {
+        Write-Host "[release-acl:inventory-$Phase-progress] entries=$($entries.Count)"
+      }
+      if ($isDirectory -and -not $isReparsePoint) {
+        $pending.Push([pscustomobject]@{
+            directory = [System.IO.DirectoryInfo]$item
+            depth = [int]($cursor.depth + 1)
+          })
+      }
+    }
+  }
+  if ($observedLinks.Count -ne $AllowedWorkspaceLinks.Count) {
+    throw "Release ACL inventory did not observe every declared workspace junction."
+  }
+  $inventoryLines.Sort([System.StringComparer]::Ordinal)
+  $inventoryText = [string]::Join("`n", $inventoryLines)
+  $inventorySha256 = [Convert]::ToHexString(
+    [System.Security.Cryptography.SHA256]::HashData(
+      [System.Text.Encoding]::UTF8.GetBytes($inventoryText)
+    )
+  ).ToLowerInvariant()
+  Write-Host "[release-acl:inventory-$Phase-complete] entries=$($entries.Count) reparsePoints=$($observedLinks.Count) inventorySha256=$inventorySha256"
+  return [ordered]@{
+    entries = @($entries)
+    entryCount = $entries.Count
+    reparsePointCount = $observedLinks.Count
+    inventorySha256 = $inventorySha256
+  }
+}
+
+function Invoke-ReleaseTreeAclWorker {
+  param(
+    [Parameter(Mandatory)][string]$ContainmentRoot,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][string]$AllowedWorkspaceLinksBase64
+  )
+
+  $containmentFull = [System.IO.Path]::GetFullPath($ContainmentRoot).TrimEnd("\")
+  $deploymentRoot = [System.IO.Path]::GetFullPath(
+    (Join-Path $script:CanonicalRepositoryRoot ".local\deployment")
+  ).TrimEnd("\")
+  $approvedContainmentRoots = [ordered]@{
+    releases = [System.IO.Path]::GetFullPath((Join-Path $deploymentRoot "releases")).TrimEnd("\")
+    staging = [System.IO.Path]::GetFullPath((Join-Path $deploymentRoot "staging")).TrimEnd("\")
+    failed = [System.IO.Path]::GetFullPath((Join-Path $deploymentRoot "failed")).TrimEnd("\")
+  }
+  $containmentKind = @($approvedContainmentRoots.GetEnumerator() | Where-Object {
+      [string]::Equals(
+        [string]$_.Value,
+        $containmentFull,
+        [System.StringComparison]::OrdinalIgnoreCase
+      )
+    } | Select-Object -ExpandProperty Key)
+  if ($containmentKind.Count -ne 1) {
+    throw "Release ACL worker containment root is outside an approved deployment directory."
+  }
+  $releaseFull = Assert-ContainedPath -Root $containmentFull -Path $ReleaseRoot
+  if (-not [string]::Equals(
+      [System.IO.Path]::GetDirectoryName($releaseFull),
+      $containmentFull,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Release ACL worker root must be a direct child of its approved containment directory."
+  }
+  $releaseName = [System.IO.Path]::GetFileName($releaseFull)
+  $releaseNameAccepted = switch ([string]$containmentKind[0]) {
+    "releases" { $releaseName -cmatch "^[0-9a-f]{40}$"; break }
+    "staging" { $releaseName -cmatch "^acl-protection-test-[0-9a-f]{32}$"; break }
+    "failed" {
+      $releaseName -cmatch "^[0-9a-f]{40}-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-(release|staging)$"
+      break
+    }
+    default { $false }
+  }
+  if (-not $releaseNameAccepted) {
+    throw "Release ACL worker root name does not match its approved containment contract."
+  }
+  if ($IdentitySid -cnotmatch "^S-1-[0-9-]+$") {
+    throw "Release ACL worker identity SID is invalid."
+  }
+  $allowedJson = try {
+    [System.Text.Encoding]::UTF8.GetString(
+      [Convert]::FromBase64String($AllowedWorkspaceLinksBase64)
+    )
+  } catch {
+    throw "Release ACL worker workspace-link contract is not valid base64."
+  }
+  $allowedArray = try {
+    @(ConvertFrom-Json -InputObject $allowedJson -AsHashtable -Depth 10)
+  } catch {
+    throw "Release ACL worker workspace-link contract is not valid JSON."
+  }
+  $allowedLinks = [System.Collections.Generic.SortedDictionary[string,string]]::new(
+    [System.StringComparer]::Ordinal
+  )
+  foreach ($link in $allowedArray) {
+    if ($link -isnot [System.Collections.IDictionary] -or
+        @($link.Keys | Where-Object { $_ -notin @("linkPath", "targetRelativePath") }).Count -ne 0 -or
+        @(@("linkPath", "targetRelativePath") | Where-Object { $_ -notin $link.Keys }).Count -ne 0) {
+      throw "Release ACL worker workspace-link contract is malformed."
+    }
+    $linkPath = ([string]$link.linkPath).Replace("\", "/")
+    $targetPath = ([string]$link.targetRelativePath).Replace("\", "/")
+    if ($linkPath -cnotmatch "^node_modules/@unified-ai/[a-z0-9-]+$" -or
+        $targetPath -cnotmatch "^(apps|packages|services)/[a-z0-9-]+$" -or
+        $allowedLinks.ContainsKey($linkPath)) {
+      throw "Release ACL worker workspace-link contract is unsafe or duplicated."
+    }
+    $allowedLinks.Add($linkPath, $targetPath)
+  }
+  if ($allowedLinks.Count -lt 1 -or $allowedLinks.Count -gt 100) {
+    throw "Release ACL worker workspace-link count is outside its reviewed range."
+  }
+
+  Initialize-NativeReparsePointAcl
+  $rootIdentity = [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Inspect($releaseFull)
+  if (-not [bool]$rootIdentity.IsDirectory -or [bool]$rootIdentity.IsReparsePoint) {
+    throw "Release ACL worker root must remain a non-reparse directory."
+  }
+  $rootGuard = [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::OpenRootGuard(
+    $releaseFull,
+    [string]$rootIdentity.StableId
+  )
+  try {
+    $before = Get-ReleaseAclInventory `
+      -ReleaseRoot $releaseFull `
+      -AllowedWorkspaceLinks $allowedLinks `
+      -MaximumEntries $script:RuntimeAttestationMaximumAclEntries `
+      -Phase before
+    $orderedEntries = @($before.entries | Sort-Object `
+        @{ Expression = "depth"; Descending = $true },
+        @{ Expression = "relativePath"; Descending = $false })
+    $protectedCount = 0
+    Write-Host "[release-acl:protection-start] entries=$($before.entryCount)"
+    $depthGroups = @($orderedEntries | Group-Object depth | Sort-Object {
+          [int]$_.Name
+        } -Descending)
+    foreach ($depthGroup in $depthGroups) {
+      $depthEntries = @($depthGroup.Group | Sort-Object relativePath)
+      for ($offset = 0; $offset -lt $depthEntries.Count; $offset += 512) {
+        $batchCount = [Math]::Min(512, $depthEntries.Count - $offset)
+        $batchPaths = [string[]]::new($batchCount)
+        $batchDirectories = [bool[]]::new($batchCount)
+        $batchReparsePoints = [bool[]]::new($batchCount)
+        $batchStableIds = [string[]]::new($batchCount)
+        for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
+          $entry = $depthEntries[$offset + $batchIndex]
+          $batchPaths[$batchIndex] = [string]$entry.path
+          $batchDirectories[$batchIndex] = [bool]$entry.isDirectory
+          $batchReparsePoints[$batchIndex] = [bool]$entry.isReparsePoint
+          $batchStableIds[$batchIndex] = [string]$entry.stableId
+        }
+        [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::SetAndVerifyBatch(
+          $batchPaths,
+          $batchDirectories,
+          $batchReparsePoints,
+          $batchStableIds,
+          $IdentitySid,
+          4
+        )
+        $protectedCount += $batchCount
+        Write-Host "[release-acl:protection-progress] protected=$protectedCount total=$($before.entryCount)"
+      }
+    }
+    Set-ExplicitProtectedPathAcl `
+      -Path $releaseFull `
+      -IdentitySid $IdentitySid `
+      -IsDirectory $true `
+      -ExpectedStableId ([string]$rootIdentity.StableId) `
+      -InheritToChildren
+    Write-Host "[release-acl:root-protected]"
+    $after = Get-ReleaseAclInventory `
+      -ReleaseRoot $releaseFull `
+      -AllowedWorkspaceLinks $allowedLinks `
+      -MaximumEntries $script:RuntimeAttestationMaximumAclEntries `
+      -Phase after
+    if ([int]$after.entryCount -ne [int]$before.entryCount -or
+        [int]$after.reparsePointCount -ne [int]$before.reparsePointCount -or
+        [string]$after.inventorySha256 -cne [string]$before.inventorySha256) {
+      throw "Release ACL inventory changed during protection."
+    }
+    $finalEntries = @($after.entries | Sort-Object relativePath)
+    $verifiedCount = 0
+    Write-Host "[release-acl:final-verification-start] entries=$($after.entryCount)"
+    for ($offset = 0; $offset -lt $finalEntries.Count; $offset += 512) {
+      $batchCount = [Math]::Min(512, $finalEntries.Count - $offset)
+      $batchPaths = [string[]]::new($batchCount)
+      $batchDirectories = [bool[]]::new($batchCount)
+      $batchReparsePoints = [bool[]]::new($batchCount)
+      $batchStableIds = [string[]]::new($batchCount)
+      for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
+        $entry = $finalEntries[$offset + $batchIndex]
+        $batchPaths[$batchIndex] = [string]$entry.path
+        $batchDirectories[$batchIndex] = [bool]$entry.isDirectory
+        $batchReparsePoints[$batchIndex] = [bool]$entry.isReparsePoint
+        $batchStableIds[$batchIndex] = [string]$entry.stableId
+      }
+      [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::VerifyBatch(
+        $batchPaths,
+        $batchDirectories,
+        $batchReparsePoints,
+        $batchStableIds,
+        $IdentitySid,
+        4
+      )
+      $verifiedCount += $batchCount
+      Write-Host "[release-acl:final-verification-progress] verified=$verifiedCount total=$($after.entryCount)"
+    }
+    [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::VerifyExactPath(
+      $releaseFull,
+      $IdentitySid,
+      $true,
+      $false,
+      $true,
+      [string]$rootIdentity.StableId
+    )
+    Write-Host "[release-acl:final-verification-complete] entries=$verifiedCount"
+    Write-Host "[release-acl:complete] entries=$($before.entryCount) reparsePoints=$($before.reparsePointCount) inventorySha256=$($before.inventorySha256)"
+  } finally {
+    $rootGuard.Dispose()
+  }
+}
+
+function Invoke-ReleaseTreeAclProtectionProcess {
+  param(
+    [Parameter(Mandatory)][string]$ContainmentRoot,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][object[]]$WorkspaceLinks,
+    [Parameter(Mandatory)][ValidateRange(1, 1800)][int]$TimeoutSeconds
+  )
+
+  $contracts = @($WorkspaceLinks | ForEach-Object {
+      [ordered]@{
+        linkPath = [string]$_.linkPath
+        targetRelativePath = [string]$_.targetRelativePath
+      }
+    })
+  $contractJson = ConvertTo-Json -InputObject $contracts -Compress -Depth 5 -AsArray
+  $contractBase64 = [Convert]::ToBase64String(
+    [System.Text.Encoding]::UTF8.GetBytes($contractJson)
+  )
+  $pwshPath = [string](Get-Process -Id $PID).Path
+  $result = Invoke-BoundedProcess `
+    -FilePath $pwshPath `
+    -ArgumentList @(
+      "-NoLogo", "-NoProfile", "-NonInteractive",
+      "-File", $script:DeploymentCommonPath,
+      "-ReleaseAclWorker",
+      "-ReleaseAclContainmentRoot", $ContainmentRoot,
+      "-ReleaseAclRoot", $ReleaseRoot,
+      "-ReleaseAclIdentitySid", $IdentitySid,
+      "-ReleaseAclAllowedReparsePathsBase64", $contractBase64
+    ) `
+    -WorkingDirectory $ContainmentRoot `
+    -TimeoutSeconds $TimeoutSeconds `
+    -IdleTimeoutSeconds 60 `
+    -MaxOutputCharacters 1048576 `
+    -Context "Explicit-entry release ACL protection" `
+    -EchoOutput
+  if ([int]$result.exitCode -ne 0) {
+    throw "Explicit-entry release ACL protection failed: $([string]$result.stderr)"
+  }
+  $completion = [regex]::Match(
+    [string]$result.stdout,
+    "(?m)^\[release-acl:complete\] entries=(?<entries>[0-9]+) reparsePoints=(?<links>[0-9]+) inventorySha256=(?<sha>[0-9a-f]{64})\r?$"
+  )
+  if (-not $completion.Success) {
+    throw "Explicit-entry release ACL protection did not emit its completion receipt."
+  }
+  return [ordered]@{
+    entryCount = [int]$completion.Groups["entries"].Value
+    reparsePointCount = [int]$completion.Groups["links"].Value
+    inventorySha256 = [string]$completion.Groups["sha"].Value
+    elapsedMilliseconds = [int64]$result.elapsedMilliseconds
+  }
+}
+
 function Assert-ProtectedAclContract {
   param(
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][string]$IdentitySid,
     [Parameter(Mandatory)][ValidateSet("ReadAndExecute", "FullControl")][string]$IdentityAccess,
+    [ValidateSet("Inherited", "Explicit")][string]$DescendantAclMode = "Inherited",
     [switch]$Recursive,
     [string[]]$BoundedPaths = @()
   )
@@ -2331,11 +3374,8 @@ function Assert-ProtectedAclContract {
     throw "Protected ACL tree exceeds the reviewed validation limit."
   }
   $expectedSids = @($IdentitySid, "S-1-5-18")
-  $writeRights = [System.Security.AccessControl.FileSystemRights]::Write -bor
-    [System.Security.AccessControl.FileSystemRights]::Delete -bor
-    [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-    [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-    [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+  $expectedReadExecute = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+    [System.Security.AccessControl.FileSystemRights]::Synchronize
   for ($pathIndex = 0; $pathIndex -lt $paths.Count; $pathIndex++) {
     $protectedPath = $paths[$pathIndex]
     $isRootPath = [string]::Equals(
@@ -2343,9 +3383,20 @@ function Assert-ProtectedAclContract {
       $rootFull,
       [System.StringComparison]::OrdinalIgnoreCase
     )
+    $protectedItem = Get-Item -LiteralPath $protectedPath -Force
+    $isReparsePoint = ($protectedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    if ($DescendantAclMode -ceq "Explicit" -and $isReparsePoint) {
+      if ($isRootPath -or -not $protectedItem.PSIsContainer -or [string]$protectedItem.LinkType -cne "Junction") {
+        throw "Explicit release ACL verification found an unsupported reparse point: $protectedPath"
+      }
+      Initialize-NativeReparsePointAcl
+      [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Verify($protectedPath, $IdentitySid)
+      continue
+    }
     $acl = Get-Acl -LiteralPath $protectedPath
-    if (($isRootPath -and -not $acl.AreAccessRulesProtected) -or
-        (-not $isRootPath -and $acl.AreAccessRulesProtected)) {
+    $expectProtected = $isRootPath -or $DescendantAclMode -ceq "Explicit"
+    $expectInherited = -not $isRootPath -and $DescendantAclMode -ceq "Inherited"
+    if ([bool]$acl.AreAccessRulesProtected -ne $expectProtected) {
       throw "Protected ACL inheritance state is incorrect: $protectedPath"
     }
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -2356,22 +3407,21 @@ function Assert-ProtectedAclContract {
         throw "Protected ACL contains an unresolvable identity: $protectedPath"
       }
       if ([string]$rule.AccessControlType -cne "Allow" -or
-          [bool]$rule.IsInherited -ne (-not $isRootPath) -or
+          [bool]$rule.IsInherited -ne $expectInherited -or
           $sid -notin $expectedSids -or
           -not $seen.Add($sid)) {
         throw "Protected ACL contains an unexpected, inherited, or duplicate rule for $sid at $protectedPath."
       }
       $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
       if ($sid -ceq "S-1-5-18") {
-        if (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+        if ($rights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
           throw "Protected ACL does not grant LocalSystem full control: $protectedPath"
         }
       } elseif ($IdentityAccess -ceq "FullControl") {
-        if (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+        if ($rights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
           throw "Protected ACL does not grant the runtime identity full control: $protectedPath"
         }
-      } elseif (($rights -band [System.Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -or
-          ($rights -band $writeRights) -ne 0) {
+      } elseif ($rights -ne $expectedReadExecute) {
         throw "Protected ACL does not restrict the runtime identity to read and execute: $protectedPath"
       }
     }
@@ -2401,35 +3451,27 @@ function Protect-ReleaseDirectory {
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$IdentitySid,
-    [Parameter(Mandatory)][string[]]$CriticalPaths
+    [Parameter(Mandatory)][string[]]$CriticalPaths,
+    [Parameter(Mandatory)][object[]]$WorkspaceLinks
   )
 
   [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
   if ($IdentitySid -cnotmatch "^S-1-[0-9-]+$") {
     throw "Release protection identity SID is invalid."
   }
-  $aclResult = Invoke-BoundedProcess `
-    -FilePath $script:CanonicalIcaclsPath `
-    -ArgumentList @(
-      $ReleaseRoot,
-      "/inheritance:r",
-      "/grant:r",
-      "*$($IdentitySid):(OI)(CI)RX",
-      "*S-1-5-18:(OI)(CI)F",
-      "/Q"
-    ) `
-    -WorkingDirectory $Layout.Releases `
-    -TimeoutSeconds $script:RuntimeAttestationProtectionTimeoutSeconds `
-    -MaxOutputCharacters 1048576 `
-    -Context "Release root ACL protection"
-  if ([int]$aclResult.exitCode -ne 0) {
-    throw "Unable to seal release directory read-only: $([string]$aclResult.stderr)"
-  }
+  $protection = Invoke-ReleaseTreeAclProtectionProcess `
+    -ContainmentRoot $Layout.Releases `
+    -ReleaseRoot $ReleaseRoot `
+    -IdentitySid $IdentitySid `
+    -WorkspaceLinks $WorkspaceLinks `
+    -TimeoutSeconds $script:RuntimeAttestationReleaseProtectionTimeoutSeconds
   [void](Assert-BoundedReleaseDirectoryProtection `
       -Layout $Layout `
       -ReleaseRoot $ReleaseRoot `
       -IdentitySid $IdentitySid `
-      -CriticalPaths $CriticalPaths)
+      -CriticalPaths $CriticalPaths `
+      -DescendantAclMode Explicit)
+  return $protection
 }
 
 function Assert-BoundedReleaseDirectoryProtection {
@@ -2437,7 +3479,8 @@ function Assert-BoundedReleaseDirectoryProtection {
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$IdentitySid,
-    [Parameter(Mandatory)][string[]]$CriticalPaths
+    [Parameter(Mandatory)][string[]]$CriticalPaths,
+    [ValidateSet("Inherited", "Explicit")][string]$DescendantAclMode = "Inherited"
   )
 
   [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
@@ -2448,6 +3491,7 @@ function Assert-BoundedReleaseDirectoryProtection {
       -Path $ReleaseRoot `
       -IdentitySid $IdentitySid `
       -IdentityAccess ReadAndExecute `
+      -DescendantAclMode $DescendantAclMode `
       -BoundedPaths $CriticalPaths)
 }
 
@@ -2455,7 +3499,8 @@ function Assert-ReleaseDirectoryProtection {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
-    [Parameter(Mandatory)][string]$IdentitySid
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [ValidateSet("Inherited", "Explicit")][string]$DescendantAclMode = "Inherited"
   )
 
   [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
@@ -2463,6 +3508,7 @@ function Assert-ReleaseDirectoryProtection {
       -Path $ReleaseRoot `
       -IdentitySid $IdentitySid `
       -IdentityAccess ReadAndExecute `
+      -DescendantAclMode $DescendantAclMode `
       -Recursive)
 }
 
@@ -3247,9 +4293,21 @@ function Recover-InterruptedReleaseInstallation {
       -Path (Join-Path $Layout.RuntimeIntegrity "$commitSha.json")
     if (Test-Path -LiteralPath $sealPath -PathType Leaf) {
       $identity = Get-CurrentWindowsIdentityReceipt
-      $aclOutput = & $script:CanonicalIcaclsPath $sealPath /inheritance:e /grant:r "*$([string]$identity.identitySid):F" /Q 2>&1
-      if ($LASTEXITCODE -ne 0) {
-        throw "Unable to reopen interrupted runtime seal for quarantine: $($aclOutput -join [Environment]::NewLine)"
+      $sealRecoveryAcl = Invoke-BoundedProcess `
+        -FilePath $script:CanonicalIcaclsPath `
+        -ArgumentList @(
+          $sealPath,
+          "/inheritance:e",
+          "/grant:r",
+          "*$([string]$identity.identitySid):F",
+          "/Q"
+        ) `
+        -WorkingDirectory $Layout.RuntimeIntegrity `
+        -TimeoutSeconds $script:RuntimeAttestationSealProtectionTimeoutSeconds `
+        -MaxOutputCharacters 1048576 `
+        -Context "Interrupted runtime seal recovery"
+      if ([int]$sealRecoveryAcl.exitCode -ne 0) {
+        throw "Unable to reopen interrupted runtime seal for quarantine: $([string]$sealRecoveryAcl.stderr)"
       }
       $failedSeal = Assert-ContainedPath `
         -Root $Layout.Failed `
@@ -3879,4 +4937,22 @@ function Test-ReleaseWebDocument {
     $client.Dispose()
   }
   return $expectedHash
+}
+
+if ($ReleaseAclWorker) {
+  foreach ($workerValue in @(
+      $ReleaseAclContainmentRoot,
+      $ReleaseAclRoot,
+      $ReleaseAclIdentitySid,
+      $ReleaseAclAllowedReparsePathsBase64
+    )) {
+    if ([string]::IsNullOrWhiteSpace($workerValue)) {
+      throw "Release ACL worker invocation is missing a required argument."
+    }
+  }
+  Invoke-ReleaseTreeAclWorker `
+    -ContainmentRoot $ReleaseAclContainmentRoot `
+    -ReleaseRoot $ReleaseAclRoot `
+    -IdentitySid $ReleaseAclIdentitySid `
+    -AllowedWorkspaceLinksBase64 $ReleaseAclAllowedReparsePathsBase64
 }

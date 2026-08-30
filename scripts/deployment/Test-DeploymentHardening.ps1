@@ -55,6 +55,40 @@ if (-not $boundedJobTimedOut -or $boundedJobSurvivors.Count -ne 0) {
   throw "Bounded process job did not terminate an exited parent's descendant process tree."
 }
 
+$idleWatchdogMarker = "uai-idle-watchdog-$([guid]::NewGuid().ToString('N'))"
+$idleWatchdogCommand = "`$idleWatchdogMarker = '$idleWatchdogMarker'; Start-Sleep -Seconds 30"
+$idleWatchdogTriggered = $false
+try {
+  [void](Invoke-BoundedProcess `
+      -FilePath $powerShellPath `
+      -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $idleWatchdogCommand) `
+      -WorkingDirectory $RepositoryRoot `
+      -TimeoutSeconds 10 `
+      -IdleTimeoutSeconds 1 `
+      -MaxOutputCharacters 4096 `
+      -Context "Synthetic no-progress watchdog fixture")
+} catch {
+  if ($_.Exception.Message -like "*made no observable progress for 1 seconds*") {
+    $idleWatchdogTriggered = $true
+  } else {
+    throw
+  }
+}
+Start-Sleep -Milliseconds 500
+$idleWatchdogSurvivors = @(
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.ProcessId -ne $PID -and
+      [string]$_.CommandLine -like "*$idleWatchdogMarker*"
+    }
+)
+if (-not $idleWatchdogTriggered -or $idleWatchdogSurvivors.Count -ne 0) {
+  foreach ($survivor in $idleWatchdogSurvivors) {
+    Stop-Process -Id ([int]$survivor.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+  throw "Bounded process no-progress watchdog did not terminate its silent process."
+}
+
 function Invoke-AbandonedMutexChild {
   param([Parameter(Mandatory)][string]$MutexName)
 
@@ -332,6 +366,163 @@ try {
 }
 
 $controllerReceipt = Test-RecoveryControllerManifest -Layout $layout -SourceRoot $PSScriptRoot
+$aclProtectionRoot = Assert-ContainedPath `
+  -Root $layout.Staging `
+  -Path (Join-Path $layout.Staging "acl-protection-test-$([guid]::NewGuid().ToString('N'))")
+$aclOutsideRoot = Assert-ContainedPath `
+  -Root $layout.Staging `
+  -Path (Join-Path $layout.Staging "acl-outside-test-$([guid]::NewGuid().ToString('N'))")
+$aclProtectionReceipt = $null
+$staleReparseSwapRejected = $false
+$hardLinkRejected = $false
+$invalidAclContainmentRejected = $false
+$invalidAclRootNameRejected = $false
+try {
+  foreach ($directory in @(
+      (Join-Path $aclProtectionRoot "apps\api\nested"),
+      (Join-Path $aclProtectionRoot "node_modules\@unified-ai"),
+      (Join-Path $aclProtectionRoot "node_modules\plain")
+    )) {
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+  }
+  [System.IO.File]::WriteAllText(
+    (Join-Path $aclProtectionRoot "apps\api\nested\index.js"),
+    "workspace`n"
+  )
+  [void](New-Item -ItemType Directory -Path $aclOutsideRoot)
+  [System.IO.File]::WriteAllText((Join-Path $aclOutsideRoot "outside.txt"), "outside`n")
+  $outsideAclBefore = (Get-Acl -LiteralPath $aclOutsideRoot).Sddl
+  $staleEntryPath = Join-Path $aclProtectionRoot "stale-entry"
+  [void](New-Item -ItemType Directory -Path $staleEntryPath)
+  Initialize-NativeReparsePointAcl
+  $staleEntryIdentity = [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Inspect($staleEntryPath)
+  Remove-Item -LiteralPath $staleEntryPath -Force
+  [void](New-Item -ItemType Junction -Path $staleEntryPath -Target $aclOutsideRoot)
+  try {
+    [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::SetAndVerifyPath(
+      $staleEntryPath,
+      [string]$identity.identitySid,
+      $true,
+      $false,
+      $true,
+      [string]$staleEntryIdentity.StableId
+    )
+  } catch {
+    $staleReparseSwapRejected = $true
+  }
+  $outsideAclAfter = (Get-Acl -LiteralPath $aclOutsideRoot).Sddl
+  if (-not $staleReparseSwapRejected -or $outsideAclAfter -cne $outsideAclBefore) {
+    throw "Stale release metadata redirected an ACL write through a replacement junction."
+  }
+  Remove-Item -LiteralPath $staleEntryPath -Force
+
+  $hardLinkSource = Join-Path $aclProtectionRoot "node_modules\plain\hard-link-source.txt"
+  $hardLinkAlias = Join-Path $aclProtectionRoot "node_modules\plain\hard-link-alias.txt"
+  [System.IO.File]::WriteAllText($hardLinkSource, "hard-link`n")
+  [void](New-Item -ItemType HardLink -Path $hardLinkAlias -Target $hardLinkSource)
+  try {
+    [void][UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Inspect($hardLinkSource)
+  } catch {
+    $hardLinkRejected = $true
+  }
+  Remove-Item -LiteralPath $hardLinkAlias -Force
+  Remove-Item -LiteralPath $hardLinkSource -Force
+  if (-not $hardLinkRejected) {
+    throw "Release ACL inspection accepted a multi-link regular file."
+  }
+
+  try {
+    Invoke-ReleaseTreeAclWorker `
+      -ContainmentRoot $layout.State `
+      -ReleaseRoot (Join-Path $layout.State "acl-invalid") `
+      -IdentitySid ([string]$identity.identitySid) `
+      -AllowedWorkspaceLinksBase64 "W10="
+  } catch {
+    $invalidAclContainmentRejected = $true
+  }
+  try {
+    Invoke-ReleaseTreeAclWorker `
+      -ContainmentRoot $layout.Staging `
+      -ReleaseRoot $aclOutsideRoot `
+      -IdentitySid ([string]$identity.identitySid) `
+      -AllowedWorkspaceLinksBase64 "W10="
+  } catch {
+    $invalidAclRootNameRejected = $true
+  }
+  if (-not $invalidAclContainmentRejected -or -not $invalidAclRootNameRejected) {
+    throw "Release ACL worker accepted an unapproved containment root or root name."
+  }
+  [System.IO.File]::WriteAllText(
+    (Join-Path $aclProtectionRoot "node_modules\plain\index.js"),
+    "dependency`n"
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $aclProtectionRoot "node_modules\plain\.hidden"),
+    "hidden`n"
+  )
+  [void](New-Item `
+      -ItemType Junction `
+      -Path (Join-Path $aclProtectionRoot "node_modules\@unified-ai\api") `
+      -Target (Join-Path $aclProtectionRoot "apps\api"))
+  $aclIdentitySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $aclProtectionReceipt = Invoke-ReleaseTreeAclProtectionProcess `
+    -ContainmentRoot $layout.Staging `
+    -ReleaseRoot $aclProtectionRoot `
+    -IdentitySid $aclIdentitySid `
+    -WorkspaceLinks @([ordered]@{
+        linkPath = "node_modules/@unified-ai/api"
+        targetRelativePath = "apps/api"
+      }) `
+    -TimeoutSeconds 120
+  [void](Assert-ProtectedAclContract `
+      -Path $aclProtectionRoot `
+      -IdentitySid $aclIdentitySid `
+      -IdentityAccess ReadAndExecute `
+      -DescendantAclMode Explicit `
+      -Recursive)
+  Initialize-NativeReparsePointAcl
+  [UnifiedAiOrchestratorDeployment.NativeReparsePointAcl]::Verify(
+    (Join-Path $aclProtectionRoot "node_modules\@unified-ai\api"),
+    $aclIdentitySid
+  )
+  if ([int]$aclProtectionReceipt.entryCount -lt 9 -or
+      [int]$aclProtectionReceipt.reparsePointCount -ne 1 -or
+      [string]$aclProtectionReceipt.inventorySha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      [int64]$aclProtectionReceipt.elapsedMilliseconds -lt 1) {
+    throw "Explicit-entry release ACL worker did not return its bounded evidence receipt."
+  }
+} finally {
+  if (Test-Path -LiteralPath $aclProtectionRoot -PathType Container) {
+    [void](Assert-ContainedPath -Root $layout.Staging -Path $aclProtectionRoot)
+    $cleanupSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $cleanupOutput = & $script:CanonicalIcaclsPath `
+      $aclProtectionRoot `
+      "/inheritance:e" `
+      "/grant:r" `
+      "*$($cleanupSid):(OI)(CI)F" `
+      "/T" `
+      "/C" `
+      "/Q" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to reopen the bounded ACL hardening fixture: $($cleanupOutput -join [Environment]::NewLine)"
+    }
+    Remove-Item -LiteralPath $aclProtectionRoot -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $aclOutsideRoot -PathType Container) {
+    [void](Assert-ContainedPath -Root $layout.Staging -Path $aclOutsideRoot)
+    $cleanupSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    [void](& $script:CanonicalIcaclsPath `
+        $aclOutsideRoot `
+        "/inheritance:e" `
+        "/grant:r" `
+        "*$($cleanupSid):(OI)(CI)F" `
+        "/T" `
+        "/C" `
+        "/Q" 2>&1)
+    Remove-Item -LiteralPath $aclOutsideRoot -Recurse -Force
+  }
+}
+
 $testRoot = Assert-ContainedPath `
   -Root $layout.Staging `
   -Path (Join-Path $layout.Staging "hardening-test-$([guid]::NewGuid().ToString('N'))")
@@ -642,6 +833,7 @@ try {
 [ordered]@{
   accepted = $true
   boundedProcessTreeTermination = $true
+  boundedProcessIdleWatchdog = $true
   abandonedMutexRecoveries = 2
   scheduledTaskMutationsRejected = $mutations.Count
   unsafeWindowsPayloadPathsRejected = $unsafePayloadPaths.Count
@@ -655,6 +847,13 @@ try {
   nodeRuntimeTreeSha256 = [string]$nodeRuntime.payloadTreeSha256
   nodeRuntimeVerificationMilliseconds = [int64]$nodeRuntimeTimer.ElapsedMilliseconds
   runtimeTreeFaultsRejected = 5
+  explicitReleaseAclEntries = [int]$aclProtectionReceipt.entryCount
+  explicitReleaseAclReparsePoints = [int]$aclProtectionReceipt.reparsePointCount
+  explicitReleaseAclInventorySha256 = [string]$aclProtectionReceipt.inventorySha256
+  explicitReleaseAclElapsedMilliseconds = [int64]$aclProtectionReceipt.elapsedMilliseconds
+  staleReparseSwapRejected = $staleReparseSwapRejected
+  hardLinkReleaseEntryRejected = $hardLinkRejected
+  aclContainmentContractsRejected = 2
   activationStateFaultsRejected = 5
   releaseInstallationRecoveryFaultsRejected = 4
 } | ConvertTo-Json -Depth 10
