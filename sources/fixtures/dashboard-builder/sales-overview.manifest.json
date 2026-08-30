@@ -1,0 +1,428 @@
+{
+  "schemaVersion": "dashboard-template/v1",
+  "template": {
+    "templateId": "sales-overview",
+    "name": "Sales overview",
+    "version": "1.0.0",
+    "description": "Synthetic sales activity for the governed dashboard builder sample."
+  },
+  "provenance": {
+    "source": "native",
+    "sourceReference": null
+  },
+  "runtime": {
+    "preferredAdapter": "fixture",
+    "fixtureId": "sales-overview-v1"
+  },
+  "parameters": [
+    {
+      "parameterId": "minimum-sales",
+      "label": "Minimum sales",
+      "type": "number",
+      "defaultValue": 0,
+      "minimum": 0,
+      "maximum": 1000000,
+      "affects": "data"
+    }
+  ],
+  "bindings": [
+    {
+      "bindingId": "order-date",
+      "sourceField": "order-date",
+      "role": "dimension",
+      "valueType": "date",
+      "format": "date-short",
+      "nullHandling": "exclude"
+    },
+    {
+      "bindingId": "region",
+      "sourceField": "region",
+      "role": "dimension",
+      "valueType": "string",
+      "format": null,
+      "nullHandling": "exclude"
+    },
+    {
+      "bindingId": "channel",
+      "sourceField": "channel",
+      "role": "filter",
+      "valueType": "string",
+      "format": null,
+      "nullHandling": "exclude"
+    },
+    {
+      "bindingId": "sales",
+      "sourceField": "sales",
+      "role": "measure-input",
+      "valueType": "number",
+      "format": "currency-usd",
+      "nullHandling": "zero"
+    },
+    {
+      "bindingId": "cost",
+      "sourceField": "cost",
+      "role": "measure-input",
+      "valueType": "number",
+      "format": "currency-usd",
+      "nullHandling": "zero"
+    },
+    {
+      "bindingId": "units",
+      "sourceField": "units",
+      "role": "measure-input",
+      "valueType": "number",
+      "format": "integer",
+      "nullHandling": "zero"
+    }
+  ],
+  "calculations": [
+    {
+      "calculationId": "total-sales",
+      "label": "Total sales",
+      "kind": "portable",
+      "valueType": "number",
+      "format": "currency-usd",
+      "expression": {
+        "kind": "operation",
+        "operator": "sum",
+        "operands": [
+          {
+            "kind": "binding",
+            "bindingId": "sales"
+          }
+        ]
+      }
+    },
+    {
+      "calculationId": "total-profit",
+      "label": "Total profit",
+      "kind": "portable",
+      "valueType": "number",
+      "format": "currency-usd",
+      "expression": {
+        "kind": "operation",
+        "operator": "difference",
+        "operands": [
+          {
+            "kind": "operation",
+            "operator": "sum",
+            "operands": [
+              {
+                "kind": "binding",
+                "bindingId": "sales"
+              }
+            ]
+          },
+          {
+            "kind": "operation",
+            "operator": "sum",
+            "operands": [
+              {
+                "kind": "binding",
+                "bindingId": "cost"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "calculationId": "average-sale",
+      "label": "Average sale",
+      "kind": "portable",
+      "valueType": "number",
+      "format": "currency-usd",
+      "expression": {
+        "kind": "operation",
+        "operator": "average",
+        "operands": [
+          {
+            "kind": "binding",
+            "bindingId": "sales"
+          }
+        ]
+      }
+    },
+    {
+      "calculationId": "total-units",
+      "label": "Total units",
+      "kind": "portable",
+      "valueType": "number",
+      "format": "integer",
+      "expression": {
+        "kind": "operation",
+        "operator": "sum",
+        "operands": [
+          {
+            "kind": "binding",
+            "bindingId": "units"
+          }
+        ]
+      }
+    }
+  ],
+  "components": [
+    {
+      "componentId": "sales-kpi",
+      "type": "kpi",
+      "title": "Total sales",
+      "adapter": "preferred",
+      "emptyState": "No sales are available.",
+      "calculationId": "total-sales",
+      "format": "currency-usd"
+    },
+    {
+      "componentId": "sales-table",
+      "type": "data-table",
+      "title": "Sales details",
+      "adapter": "preferred",
+      "emptyState": "No rows match the current filters.",
+      "columns": [
+        {
+          "columnId": "table-region",
+          "source": {
+            "kind": "binding",
+            "id": "region"
+          },
+          "header": "Region",
+          "alignment": "start",
+          "width": 160,
+          "sort": "ascending",
+          "totalBehavior": "none"
+        },
+        {
+          "columnId": "table-channel",
+          "source": {
+            "kind": "binding",
+            "id": "channel"
+          },
+          "header": "Channel",
+          "alignment": "start",
+          "width": 140,
+          "sort": "none",
+          "totalBehavior": "none"
+        },
+        {
+          "columnId": "table-sales",
+          "source": {
+            "kind": "binding",
+            "id": "sales"
+          },
+          "header": "Sales",
+          "alignment": "end",
+          "width": 140,
+          "sort": "descending",
+          "totalBehavior": "sum"
+        },
+        {
+          "columnId": "table-profit",
+          "source": {
+            "kind": "calculation",
+            "id": "total-profit"
+          },
+          "header": "Profit",
+          "alignment": "end",
+          "width": 140,
+          "sort": "none",
+          "totalBehavior": "sum"
+        }
+      ],
+      "pageSize": 25,
+      "selection": "single"
+    },
+    {
+      "componentId": "sales-region-bar",
+      "type": "bar-chart",
+      "title": "Sales by region",
+      "adapter": "preferred",
+      "emptyState": "No regional totals are available.",
+      "dimensionBindingId": "region",
+      "calculationIds": [
+        "total-sales"
+      ],
+      "sort": "value-descending"
+    },
+    {
+      "componentId": "sales-trend-line",
+      "type": "line-chart",
+      "title": "Sales over time",
+      "adapter": "preferred",
+      "emptyState": "No dated sales are available.",
+      "dimensionBindingId": "order-date",
+      "calculationIds": [
+        "total-sales"
+      ],
+      "sort": "dimension-ascending"
+    },
+    {
+      "componentId": "channel-filter",
+      "type": "filter",
+      "title": "Channel",
+      "adapter": "preferred",
+      "emptyState": "No channels are available.",
+      "bindingId": "channel",
+      "multiSelect": true
+    },
+    {
+      "componentId": "sample-notes",
+      "type": "text",
+      "title": "About this sample",
+      "adapter": "preferred",
+      "emptyState": "Sample notes are unavailable.",
+      "text": "Invented rows demonstrate the governed fixture preview and do not represent a real organization."
+    }
+  ],
+  "interactions": [
+    {
+      "interactionId": "filter-region-from-bar",
+      "type": "set-filter",
+      "sourceComponentId": "sales-region-bar",
+      "targetBindingId": "region"
+    }
+  ],
+  "theme": {
+    "surface": "#F2F5F7",
+    "text": "#132238",
+    "accent": "#1C4E80",
+    "success": "#2E7D5B",
+    "warning": "#E77C3C",
+    "fontScale": 1,
+    "spacing": "comfortable",
+    "radius": 8
+  },
+  "layout": {
+    "columns": 12,
+    "large": [
+      {
+        "componentId": "sales-kpi",
+        "x": 0,
+        "y": 0,
+        "width": 3,
+        "height": 2
+      },
+      {
+        "componentId": "channel-filter",
+        "x": 3,
+        "y": 0,
+        "width": 3,
+        "height": 2
+      },
+      {
+        "componentId": "sample-notes",
+        "x": 6,
+        "y": 0,
+        "width": 6,
+        "height": 2
+      },
+      {
+        "componentId": "sales-region-bar",
+        "x": 0,
+        "y": 2,
+        "width": 6,
+        "height": 4
+      },
+      {
+        "componentId": "sales-trend-line",
+        "x": 6,
+        "y": 2,
+        "width": 6,
+        "height": 4
+      },
+      {
+        "componentId": "sales-table",
+        "x": 0,
+        "y": 6,
+        "width": 12,
+        "height": 5
+      }
+    ],
+    "medium": [
+      {
+        "componentId": "sales-kpi",
+        "x": 0,
+        "y": 0,
+        "width": 6,
+        "height": 2
+      },
+      {
+        "componentId": "channel-filter",
+        "x": 6,
+        "y": 0,
+        "width": 6,
+        "height": 2
+      },
+      {
+        "componentId": "sample-notes",
+        "x": 0,
+        "y": 2,
+        "width": 12,
+        "height": 2
+      },
+      {
+        "componentId": "sales-region-bar",
+        "x": 0,
+        "y": 4,
+        "width": 12,
+        "height": 4
+      },
+      {
+        "componentId": "sales-trend-line",
+        "x": 0,
+        "y": 8,
+        "width": 12,
+        "height": 4
+      },
+      {
+        "componentId": "sales-table",
+        "x": 0,
+        "y": 12,
+        "width": 12,
+        "height": 5
+      }
+    ],
+    "small": [
+      {
+        "componentId": "sales-kpi",
+        "x": 0,
+        "y": 0,
+        "width": 12,
+        "height": 2
+      },
+      {
+        "componentId": "channel-filter",
+        "x": 0,
+        "y": 2,
+        "width": 12,
+        "height": 2
+      },
+      {
+        "componentId": "sample-notes",
+        "x": 0,
+        "y": 4,
+        "width": 12,
+        "height": 3
+      },
+      {
+        "componentId": "sales-region-bar",
+        "x": 0,
+        "y": 7,
+        "width": 12,
+        "height": 4
+      },
+      {
+        "componentId": "sales-trend-line",
+        "x": 0,
+        "y": 11,
+        "width": 12,
+        "height": 4
+      },
+      {
+        "componentId": "sales-table",
+        "x": 0,
+        "y": 15,
+        "width": 12,
+        "height": 5
+      }
+    ]
+  }
+}

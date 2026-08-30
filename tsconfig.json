@@ -1,0 +1,47 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/policy-engine"
+    },
+    {
+      "path": "./packages/repository-tools"
+    },
+    {
+      "path": "./packages/ollama-client"
+    },
+    {
+      "path": "./packages/runtime-manager"
+    },
+    {
+      "path": "./packages/whiteshadow-client"
+    },
+    {
+      "path": "./packages/agent-runtime"
+    },
+    {
+      "path": "./services/evidence-index"
+    },
+    {
+      "path": "./services/session-ingestion"
+    },
+    {
+      "path": "./services/portfolio-ingestion"
+    },
+    {
+      "path": "./services/portfolio-reconciliation"
+    },
+    {
+      "path": "./services/dashboard-builder"
+    },
+    {
+      "path": "./apps/api"
+    },
+    {
+      "path": "./apps/web"
+    }
+  ]
+}

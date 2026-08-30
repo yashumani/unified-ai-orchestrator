@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "portfolio-fixture/v1",
+  "owner": "synthetic-owner",
+  "repositoryCount": 23,
+  "outcomes": {
+    "complete": 19,
+    "renamed": 1,
+    "deleted": 1,
+    "permission-gap": 1,
+    "incomplete": 1
+  },
+  "closedWorkItemLimit": 20,
+  "recentCommitLimit": 100
+}

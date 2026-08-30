@@ -1,0 +1,21 @@
+{
+  "name": "@unified-ai/session-ingestion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "ingest:fixture": "tsx src/ingest-fixture.ts"
+  },
+  "dependencies": {
+    "@unified-ai/contracts": "0.1.0",
+    "@unified-ai/evidence-index": "0.1.0"
+  }
+}

@@ -1,0 +1,51 @@
+export {
+  GitHubReadError,
+  GitHubRestClient,
+  MemoryGitHubEtagCache,
+  parseRateLimit,
+  parseRetryAfter,
+  type GitHubReadErrorLogRecord,
+  type GitHubRestClientOptions
+} from "./github-rest-client.js";
+export {
+  GitHubPortfolioIngestor,
+  type GitHubPortfolioIngestorOptions
+} from "./portfolio-ingestor.js";
+export type {
+  GitHubClientEvent,
+  GitHubCredentialProvider,
+  GitHubEtagCache,
+  GitHubEtagCacheEntry,
+  GitHubGapKind,
+  GitHubGapReason,
+  GitHubIngestionGap,
+  GitHubLinks,
+  GitHubPaginationRequest,
+  GitHubPaginationResult,
+  GitHubRateLimit,
+  GitHubReadGap,
+  GitHubReadMetadata,
+  GitHubReadMethod,
+  GitHubReadNotModified,
+  GitHubReadOk,
+  GitHubReadRequest,
+  GitHubReadResult,
+  GitHubReadSuccess,
+  GitHubVisibility,
+  PaginationCheckpoint,
+  PortfolioIngestionCheckpoint,
+  PortfolioIngestionOptions,
+  PortfolioIngestionResult,
+  RepositoryArtifactKind,
+  RepositoryCommentEvidence,
+  RepositoryCommitEvidence,
+  RepositoryFileEvidence,
+  RepositoryIngestionStatus,
+  RepositoryInventoryItem,
+  RepositoryLicenseEvidence,
+  RepositoryPortfolioSnapshot,
+  RepositoryReleaseEvidence,
+  RepositoryReviewEvidence,
+  RepositoryWorkItemEvidence,
+  GitRefFingerprint
+} from "./types.js";

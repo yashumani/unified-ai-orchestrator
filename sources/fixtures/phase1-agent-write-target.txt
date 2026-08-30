@@ -1,0 +1,5 @@
+Synthetic Phase 1 live-write fixture.
+state=baseline
+
+This file contains no private data. Live acceptance may change the state line to
+the exercised state, run an allowlisted verification command, and restore baseline.

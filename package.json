@@ -1,0 +1,35 @@
+{
+  "name": "unified-ai-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One evidence-backed orchestrator for governed local-first AI workflows.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "tsc -b --pretty false && npm --workspace @unified-ai/web run build:assets",
+    "dev": "npm run dev:api",
+    "dev:api": "npm --workspace @unified-ai/api run dev",
+    "dev:web": "npm --workspace @unified-ai/web run dev",
+    "start": "npm --workspace @unified-ai/api run start",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "check:public-boundary": "node scripts/check-public-boundary.mjs",
+    "ingest:fixture": "npm --workspace @unified-ai/session-ingestion run ingest:fixture",
+    "portfolio:acceptance": "tsx scripts/portfolio-live-acceptance.ts",
+    "dashboard:acceptance": "tsx scripts/dashboard-builder-live-acceptance.ts --local",
+    "verify": "npm run check:public-boundary && npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.0",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
