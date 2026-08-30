@@ -73,51 +73,78 @@ if ($repositoryChanges.Count -ne 0) {
   throw "Tracked or untracked repository changes are forbidden while packaging a release."
 }
 
-$files = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
-foreach ($rootFile in @('.npmrc', 'package.json', 'package-lock.json')) {
-  $path = Join-Path $resolvedRepositoryRoot $rootFile
-  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-    throw "Required release payload file is missing: $path"
-  }
-  Add-PayloadFile -Files $files -SourcePath $path
-}
-
-$workspaceRoots = @('apps', 'packages', 'services')
-foreach ($workspaceRoot in $workspaceRoots) {
-  $workspaceParent = Join-Path $resolvedRepositoryRoot $workspaceRoot
-  foreach ($workspace in @(Get-ChildItem -LiteralPath $workspaceParent -Directory | Sort-Object Name)) {
-    $manifestPath = Join-Path $workspace.FullName 'package.json'
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-      continue
-    }
-    Add-PayloadFile -Files $files -SourcePath $manifestPath
-    Add-PayloadTree -Files $files -Root (Join-Path $workspace.FullName 'dist')
-  }
-}
-
-Add-PayloadTree -Files $files -Root (Join-Path $resolvedRepositoryRoot 'sources\fixtures')
-
-$commitTimestampText = ([string](Invoke-Git -Arguments @('show', '-s', '--format=%cI', $CommitSha) | Select-Object -First 1)).Trim()
-$commitTimestamp = [DateTimeOffset]::Parse($commitTimestampText).ToUniversalTime()
+. (Join-Path $resolvedRepositoryRoot 'scripts\deployment\Deployment.Common.ps1')
 $expectedNodeVersion = 'v22.23.2'
 $nodeVersion = (& node --version 2>&1).Trim()
 if ($LASTEXITCODE -ne 0 -or $nodeVersion -cne $expectedNodeVersion) {
   throw "Release packaging requires Node.js $expectedNodeVersion; observed '$nodeVersion'."
 }
-
+$commitTimestampText = ([string](Invoke-Git -Arguments @('show', '-s', '--format=%cI', $CommitSha) | Select-Object -First 1)).Trim()
+$commitTimestamp = [DateTimeOffset]::Parse($commitTimestampText).ToUniversalTime()
 $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
-$stagingRoot = Join-Path $temporaryRoot "unified-ai-orchestrator-release-$([Guid]::NewGuid().ToString('N'))"
+$transactionId = [Guid]::NewGuid().ToString('N')
+$bundleGenerationRoot = Join-Path $temporaryRoot "unified-ai-orchestrator-bundle-$transactionId"
+$stagingRoot = Join-Path $temporaryRoot "unified-ai-orchestrator-release-$transactionId"
 $resolvedOutputPath = [IO.Path]::GetFullPath($OutputPath)
 $outputParent = Split-Path -Parent $resolvedOutputPath
 if ([string]::IsNullOrWhiteSpace($outputParent)) {
   throw 'OutputPath must include a parent directory.'
 }
 New-Item -ItemType Directory -Path $outputParent -Force | Out-Null
-if (Test-Path -LiteralPath $resolvedOutputPath) {
-  Remove-Item -LiteralPath $resolvedOutputPath -Force
-}
+$artifactTemporaryPath = "$resolvedOutputPath.$transactionId.tmp"
+$checksumPath = "$resolvedOutputPath.sha256"
+$checksumTemporaryPath = "$checksumPath.$transactionId.tmp"
 
 try {
+  [void](New-Item -ItemType Directory -Path $bundleGenerationRoot)
+  Write-Host "[release-artifact:source-build-start] commitSha=$CommitSha nodeVersion=$nodeVersion"
+  & npm run build --silent
+  if ($LASTEXITCODE -ne 0) {
+    throw "Release packaging source build failed with exit code $LASTEXITCODE."
+  }
+  Write-Host "[release-artifact:source-build-complete] commitSha=$CommitSha"
+  Copy-Item `
+    -LiteralPath (Join-Path $resolvedRepositoryRoot 'package-lock.json') `
+    -Destination (Join-Path $bundleGenerationRoot 'package-lock.json')
+  & node `
+    (Join-Path $resolvedRepositoryRoot 'scripts\release\build-production-server-bundle.mjs') `
+    --output-root $bundleGenerationRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Private bundled-runtime generation failed with exit code $LASTEXITCODE."
+  }
+  [void](Read-BundledRuntimeBuildReceipt -ReleaseRoot $bundleGenerationRoot)
+
+  $files = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+  foreach ($rootFile in @('.npmrc', 'package.json', 'package-lock.json')) {
+    $path = Join-Path $resolvedRepositoryRoot $rootFile
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Required release payload file is missing: $path"
+    }
+    Add-PayloadFile -Files $files -SourcePath $path
+  }
+
+  $workspaceRoots = @('apps', 'packages', 'services')
+  foreach ($workspaceRoot in $workspaceRoots) {
+    $workspaceParent = Join-Path $resolvedRepositoryRoot $workspaceRoot
+    foreach ($workspace in @(Get-ChildItem -LiteralPath $workspaceParent -Directory | Sort-Object Name)) {
+      $manifestPath = Join-Path $workspace.FullName 'package.json'
+      if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        continue
+      }
+      Add-PayloadFile -Files $files -SourcePath $manifestPath
+      Add-PayloadTree -Files $files -Root (Join-Path $workspace.FullName 'dist')
+    }
+  }
+  foreach ($bundledRuntimePayloadPath in @($script:BundledRuntimePath, $script:BundledRuntimeBuildReceiptPath)) {
+    if (-not $files.ContainsKey($bundledRuntimePayloadPath)) {
+      throw "Compiled payload omitted required bundled runtime path: $bundledRuntimePayloadPath"
+    }
+    $files[$bundledRuntimePayloadPath] = Get-BundledRuntimeContainedPath `
+      -Root $bundleGenerationRoot `
+      -RelativePath $bundledRuntimePayloadPath
+  }
+  Add-PayloadTree -Files $files -Root (Join-Path $resolvedRepositoryRoot 'sources\fixtures')
+
   New-Item -ItemType Directory -Path $stagingRoot | Out-Null
   $payloadHashes = [ordered]@{}
   $relativePaths = [System.Collections.Generic.List[string]]::new()
@@ -132,7 +159,12 @@ try {
     New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
     Copy-Item -LiteralPath $files[$relativePath] -Destination $destination
     [IO.File]::SetLastWriteTimeUtc($destination, $commitTimestamp.UtcDateTime)
-    $payloadHashes[$relativePath] = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+
+  [void](Read-BundledRuntimeBuildReceipt -ReleaseRoot $stagingRoot)
+  foreach ($relativePath in $relativePaths) {
+    $stagedPath = Join-Path $stagingRoot ($relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar))
+    $payloadHashes[$relativePath] = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
 
   $packageLockSha256 = $payloadHashes['package-lock.json']
@@ -151,7 +183,7 @@ try {
 
   Add-Type -AssemblyName System.IO.Compression
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $stream = [IO.File]::Open($resolvedOutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $stream = [IO.File]::Open($artifactTemporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
   try {
     $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
     try {
@@ -188,8 +220,16 @@ try {
     $stream.Dispose()
   }
 
-  $archiveSha256 = (Get-FileHash -LiteralPath $resolvedOutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-  [IO.File]::WriteAllText("$resolvedOutputPath.sha256", "$archiveSha256  $([IO.Path]::GetFileName($resolvedOutputPath))`n", [Text.UTF8Encoding]::new($false))
+  $archiveSha256 = (Get-FileHash -LiteralPath $artifactTemporaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  [IO.File]::WriteAllText($checksumTemporaryPath, "$archiveSha256  $([IO.Path]::GetFileName($resolvedOutputPath))`n", [Text.UTF8Encoding]::new($false))
+  if (Test-Path -LiteralPath $checksumPath) {
+    Remove-Item -LiteralPath $checksumPath -Force
+  }
+  if (Test-Path -LiteralPath $resolvedOutputPath) {
+    Remove-Item -LiteralPath $resolvedOutputPath -Force
+  }
+  Move-Item -LiteralPath $artifactTemporaryPath -Destination $resolvedOutputPath
+  Move-Item -LiteralPath $checksumTemporaryPath -Destination $checksumPath
   [ordered]@{
     accepted = $true
     artifactPath = $resolvedOutputPath
@@ -199,9 +239,20 @@ try {
   } | ConvertTo-Json -Compress
 }
 finally {
+  foreach ($temporaryPath in @($artifactTemporaryPath, $checksumTemporaryPath)) {
+    if (Test-Path -LiteralPath $temporaryPath) {
+      Remove-Item -LiteralPath $temporaryPath -Force
+    }
+  }
   $resolvedStagingRoot = [IO.Path]::GetFullPath($stagingRoot)
   $expectedPrefix = "$temporaryRoot$([IO.Path]::DirectorySeparatorChar)unified-ai-orchestrator-release-"
   if ((Test-Path -LiteralPath $resolvedStagingRoot) -and $resolvedStagingRoot.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
     Remove-Item -LiteralPath $resolvedStagingRoot -Recurse -Force
+  }
+  $resolvedBundleGenerationRoot = [IO.Path]::GetFullPath($bundleGenerationRoot)
+  $expectedBundlePrefix = "$temporaryRoot$([IO.Path]::DirectorySeparatorChar)unified-ai-orchestrator-bundle-"
+  if ((Test-Path -LiteralPath $resolvedBundleGenerationRoot) -and
+      $resolvedBundleGenerationRoot.StartsWith($expectedBundlePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    Remove-Item -LiteralPath $resolvedBundleGenerationRoot -Recurse -Force
   }
 }

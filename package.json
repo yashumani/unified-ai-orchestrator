@@ -13,7 +13,8 @@
     "services/*"
   ],
   "scripts": {
-    "build": "tsc -b --pretty false && npm --workspace @unified-ai/web run build:assets",
+    "build": "tsc -b --pretty false && npm --workspace @unified-ai/web run build:assets && npm run build:runtime",
+    "build:runtime": "node scripts/release/build-production-server-bundle.mjs",
     "dev": "npm run dev:api",
     "dev:api": "npm --workspace @unified-ai/api run dev",
     "dev:web": "npm --workspace @unified-ai/web run dev",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "26.4.0",
+    "esbuild": "0.28.2",
     "tsx": "4.23.12",
     "typescript": "7.0.2",
     "vitest": "4.1.11"

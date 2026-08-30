@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -35,6 +36,84 @@ describe("release packaging and source synchronization contracts", () => {
     }
     expect(contents).toContain("Forbidden release payload path");
   });
+
+  it("builds and packages a deterministic self-contained production server", async () => {
+    const builder = await script("build-production-server-bundle.mjs");
+    const packager = await script("New-ReleaseArtifact.ps1");
+    expect(builder).toContain('buildKind = "esbuild-bundle-v1"');
+    expect(builder).toContain('process.version !== "v22.23.2"');
+    expect(builder).toContain('packages: "bundle"');
+    expect(builder).toContain('platform: "node"');
+    expect(builder).toContain('format: "esm"');
+    expect(builder).toContain('target: "node22"');
+    expect(builder).toContain('cliArguments[0] !== "--output-root"');
+    expect(builder).toContain("outfile: absoluteOutput");
+    expect(builder).toContain("Production server bundle creation is not byte-for-byte deterministic");
+    expect(builder).toContain("Production server bundling emitted warnings");
+    expect(builder).toContain("allowedRuntimeExternals.has(value)");
+    expect(builder).toContain('runtimeFeatureGuard = "copilotkit-channels-disabled-v1"');
+    expect(builder).toContain('requireBridge = "node-builtins-only-require-v1"');
+    expect(builder).toContain('runtimeResolutionGuard = "node-builtins-only-v1"');
+    expect(builder).toContain("schemaVersion: 2");
+    expect(builder).toContain("nodeVersion: process.version");
+    expect(builder).toContain("buildPlatform: process.platform");
+    expect(builder).toContain("buildArchitecture: process.arch");
+    expect(builder).toContain("reviewed SRI-pinned esbuild wrapper and platform binary");
+    expect(builder).toContain("builderPackageIntegrity");
+    expect(builder).toContain("builderBinaryIntegrity");
+    expect(builder).toContain('channelActivationSettings[0] !== "activateChannels: false"');
+    expect(builder).toContain('guardedImport = "import(CHANNELS_INTELLIGENCE_SPECIFIER)"');
+    expect(builder).toContain("__rejectDynamicModuleResolution");
+    expect(builder).toContain("Production bundle retained an unreviewed computed module-resolution path");
+    expect(builder).toContain('expressRequireCount = hardened.split("__require(mod)").length - 1');
+    expect(builder).toContain("server.bundle.mjs");
+    expect(builder).toContain("server.bundle.json");
+    expect(builder.indexOf("rm(absoluteReceipt")).toBeLessThan(
+      builder.indexOf("rm(absoluteOutput,")
+    );
+    expect(builder.indexOf("rm(absoluteOutput,")).toBeLessThan(
+      builder.indexOf("rename(outputTemporary, absoluteOutput)")
+    );
+    expect(builder.indexOf("rename(outputTemporary, absoluteOutput)")).toBeLessThan(
+      builder.indexOf("rename(receiptTemporary, absoluteReceipt)")
+    );
+    expect(packager).toContain("npm run build --silent");
+    expect(packager).toContain("--output-root $bundleGenerationRoot");
+    expect(packager).toContain(
+      "$files[$bundledRuntimePayloadPath] = Get-BundledRuntimeContainedPath"
+    );
+    expect(packager).not.toContain("foreach ($bundledRuntimePath in");
+    expect(packager.match(/Read-BundledRuntimeBuildReceipt/gu)).toHaveLength(2);
+    expect(packager).toContain("-ReleaseRoot $stagingRoot");
+    expect(packager).toContain("$artifactTemporaryPath");
+    expect(packager).toContain("Move-Item -LiteralPath $checksumTemporaryPath -Destination $checksumPath");
+  });
+
+  it(
+    "behaviorally rejects malformed, forged, and reparse-backed bundle receipts",
+    () => {
+      const output = execFileSync(
+        "pwsh",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-File",
+          resolve("scripts/release/Test-BundledRuntimeContract.ps1"),
+          "-RepositoryRoot",
+          resolve(".")
+        ],
+        { encoding: "utf8" }
+      );
+      const result = JSON.parse(output.trim().split(/\r?\n/u).at(-1));
+      expect(result).toMatchObject({ accepted: true, validCases: 1, rejectedCases: 13 });
+      expect(result.rejectedCaseNames).toContain("duplicate-key");
+      expect(result.rejectedCaseNames).toContain("case-colliding-key");
+      expect(result.rejectedCaseNames).toContain("selected-binary-lock-mismatch");
+      expect(result.rejectedCaseNames).toContain("reparse-ancestor");
+    },
+    30_000
+  );
 
   it("synchronizes only clean canonical main by fast-forward to exact origin SHA", async () => {
     const contents = await script("Sync-CanonicalMain.ps1");
