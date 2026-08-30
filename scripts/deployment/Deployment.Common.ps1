@@ -824,7 +824,7 @@ function Write-DeploymentEvent {
   }
   [System.IO.File]::AppendAllText(
     $Layout.Events,
-    "$(ConvertTo-JsonText -Value $event)`n",
+    "$($event | ConvertTo-Json -Depth 100 -Compress)`n",
     [System.Text.UTF8Encoding]::new($false)
   )
 }

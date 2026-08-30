@@ -77,7 +77,7 @@ describe("release packaging and source synchronization contracts", () => {
     expect(builder.indexOf("rename(outputTemporary, absoluteOutput)")).toBeLessThan(
       builder.indexOf("rename(receiptTemporary, absoluteReceipt)")
     );
-    expect(packager).toContain("npm run build --silent");
+    expect(packager).toContain("npm run build:release --silent");
     expect(packager).toContain("--output-root $bundleGenerationRoot");
     expect(packager).toContain(
       "$files[$bundledRuntimePayloadPath] = Get-BundledRuntimeContainedPath"
@@ -87,6 +87,43 @@ describe("release packaging and source synchronization contracts", () => {
     expect(packager).toContain("-ReleaseRoot $stagingRoot");
     expect(packager).toContain("$artifactTemporaryPath");
     expect(packager).toContain("Move-Item -LiteralPath $checksumTemporaryPath -Destination $checksumPath");
+  });
+
+  it("isolates generated outputs and revalidates the explicit source root before payload selection", async () => {
+    const packager = await script("New-ReleaseArtifact.ps1");
+    const packageJson = JSON.parse(await readFile(resolve("package.json"), "utf8"));
+    const clearInvocation = packager.indexOf(
+      "Clear-GeneratedBuildOutputs\n  Write-Host"
+    );
+    const pushLocation = packager.indexOf(
+      "Push-Location -LiteralPath $resolvedRepositoryRoot"
+    );
+    const sourceBuild = packager.indexOf("npm run build:release --silent");
+    const payloadSelection = packager.indexOf(
+      "$files = [System.Collections.Generic.Dictionary[string,string]]"
+    );
+    const sourceAssertions = packager.match(
+      /Assert-RepositoryReleaseState -ExpectedSha \$CommitSha/gu
+    );
+
+    expect(packager).toContain("function Clear-GeneratedBuildOutputs");
+    expect(packageJson.scripts["build:release"]).toContain(
+      "tsc -b --pretty false --force"
+    );
+    expect(packager).toContain("Generated build output cannot be a reparse point");
+    expect(packager).toContain(
+      "Remove-Item -LiteralPath $distRoot -Recurse -Force"
+    );
+    expect(packager).toContain("Pop-Location");
+    expect(clearInvocation).toBeGreaterThan(0);
+    expect(clearInvocation).toBeLessThan(sourceBuild);
+    expect(pushLocation).toBeGreaterThan(clearInvocation);
+    expect(pushLocation).toBeLessThan(sourceBuild);
+    expect(sourceAssertions).toHaveLength(2);
+    expect(packager.lastIndexOf("Assert-RepositoryReleaseState -ExpectedSha $CommitSha"))
+      .toBeGreaterThan(sourceBuild);
+    expect(packager.lastIndexOf("Assert-RepositoryReleaseState -ExpectedSha $CommitSha"))
+      .toBeLessThan(payloadSelection);
   });
 
   it(

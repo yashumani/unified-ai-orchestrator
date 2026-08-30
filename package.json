@@ -14,6 +14,7 @@
   ],
   "scripts": {
     "build": "tsc -b --pretty false && npm --workspace @unified-ai/web run build:assets && npm run build:runtime",
+    "build:release": "tsc -b --pretty false --force && npm --workspace @unified-ai/web run build:assets && npm run build:runtime",
     "build:runtime": "node scripts/release/build-production-server-bundle.mjs",
     "dev": "npm run dev:api",
     "dev:api": "npm --workspace @unified-ai/api run dev",
