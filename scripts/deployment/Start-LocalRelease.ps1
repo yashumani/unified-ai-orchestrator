@@ -12,6 +12,15 @@ param(
 
 $mutex = $null
 $child = $null
+$layout = $null
+$commitSha = $null
+$runId = $null
+$stdoutPath = $null
+$stderrPath = $null
+$startupDiagnosticPath = $null
+$receipt = $null
+$startupSucceeded = $false
+
 try {
   $RepositoryRoot = Assert-CanonicalRepositoryRoot -RepositoryRoot $RepositoryRoot
   [void](Assert-CanonicalHealthUri -HealthUri $HealthUri)
@@ -74,6 +83,7 @@ try {
   [void](New-Item -ItemType Directory -Path $runLogRoot -Force)
   $stdoutPath = Join-Path $runLogRoot "stdout.log"
   $stderrPath = Join-Path $runLogRoot "stderr.log"
+  $startupDiagnosticPath = Join-Path $runLogRoot "startup-diagnostic.json"
 
   $previousEnvironment = [ordered]@{}
   $runtimeEnvironment = [ordered]@{
@@ -122,33 +132,121 @@ try {
   }
   Write-AtomicJson -Layout $layout -Path $layout.Process -Value $receipt
   Write-DeploymentEvent -Layout $layout -Action "start" -Status "started" -CommitSha $commitSha -OperationId $runId -Message "Node process $($child.Id) launched."
+  Write-StartupDiagnostic `
+    -Layout $layout `
+    -Path $startupDiagnosticPath `
+    -CommitSha $commitSha `
+    -RunId $runId `
+    -ProcessId $child.Id `
+    -Phase "health-waiting" `
+    -PreCleanupState "running" `
+    -PostCleanupState "running" `
+    -ExitCode $null `
+    -StdoutPath $stdoutPath `
+    -StderrPath $stderrPath `
+    -Supervised ([bool]$Supervised)
 
   Exit-DeploymentMutex -Mutex $mutex
   $mutex = $null
-  [void](Wait-ForReleaseHealth -HealthUri $HealthUri -ExpectedSha $commitSha -TimeoutSeconds $HealthTimeoutSeconds)
+  [void](Wait-ForReleaseHealth `
+      -HealthUri $HealthUri `
+      -ExpectedSha $commitSha `
+      -TimeoutSeconds $HealthTimeoutSeconds `
+      -ObservedProcess $child)
   [void](Test-ReleaseWebDocument -ReleaseRoot $releaseRoot -TimeoutSeconds 10)
+  Write-StartupDiagnostic `
+    -Layout $layout `
+    -Path $startupDiagnosticPath `
+    -CommitSha $commitSha `
+    -RunId $runId `
+    -ProcessId $child.Id `
+    -Phase "healthy" `
+    -PreCleanupState "running" `
+    -PostCleanupState "running" `
+    -ExitCode $null `
+    -StdoutPath $stdoutPath `
+    -StderrPath $stderrPath `
+    -Supervised ([bool]$Supervised)
   Write-DeploymentEvent -Layout $layout -Action "start" -Status "succeeded" -CommitSha $commitSha -OperationId $runId -Message "Loopback health, readiness SHA, and web document checks passed."
+  $startupSucceeded = $true
   Write-Output "Started release $commitSha as PID $($child.Id); logs: $runLogRoot"
 
   if ($Supervised) {
     $child.WaitForExit()
     $exitCode = $child.ExitCode
-    $currentReceipt = if (Test-Path -LiteralPath $layout.Process -PathType Leaf) {
-      Read-JsonHashtable -Path $layout.Process
-    } else {
-      $null
-    }
-    if ($null -ne $currentReceipt -and [int]$currentReceipt.pid -eq $child.Id) {
-      Remove-Item -LiteralPath $layout.Process -Force
-    }
     Write-DeploymentEvent -Layout $layout -Action "process-exit" -Status "failed" -CommitSha $commitSha -OperationId $runId -Message "Node process exited with code $exitCode; scheduled-task restart policy may relaunch it."
     throw "Release process exited with code $exitCode."
   }
 } catch {
-  if ($null -ne $child -and -not $child.HasExited) {
-    Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+  $failureRecord = $_
+  $failureMessage = $_.Exception.Message
+  $preCleanupState = if ($null -eq $child) { "not-launched" } else { "unknown" }
+  $postCleanupState = $preCleanupState
+  $exitCode = $null
+  $childConfirmedExited = $false
+  if ($null -ne $child) {
+    try {
+      $child.Refresh()
+      $preCleanupState = if ($child.HasExited) { "exited" } else { "running" }
+      if (-not $child.HasExited) {
+        Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+        [void]$child.WaitForExit(10000)
+        $child.Refresh()
+      } else {
+        [void]$child.WaitForExit()
+      }
+      $postCleanupState = if ($child.HasExited) { "exited" } else { "running" }
+      if ($child.HasExited) {
+        $exitCode = $child.ExitCode
+        $childConfirmedExited = $true
+      }
+    } catch {
+      $postCleanupState = "cleanup-observation-failed"
+    }
   }
-  throw
+  if (-not $startupSucceeded -and
+      $null -ne $layout -and
+      $null -ne $startupDiagnosticPath -and
+      $null -ne $commitSha -and
+      $null -ne $runId -and
+      $null -ne $child) {
+    try {
+      Write-StartupDiagnostic `
+        -Layout $layout `
+        -Path $startupDiagnosticPath `
+        -CommitSha $commitSha `
+        -RunId $runId `
+        -ProcessId $child.Id `
+        -Phase "failed" `
+        -PreCleanupState $preCleanupState `
+        -PostCleanupState $postCleanupState `
+        -ExitCode $exitCode `
+        -FailureMessage $failureMessage `
+        -StdoutPath $stdoutPath `
+        -StderrPath $stderrPath `
+        -Supervised ([bool]$Supervised)
+      Write-DeploymentEvent `
+        -Layout $layout `
+        -Action "start" `
+        -Status "failed" `
+        -CommitSha $commitSha `
+        -OperationId $runId `
+        -Message "Startup failed; child was $preCleanupState before cleanup and $postCleanupState after cleanup; exit code $exitCode; $failureMessage"
+    } catch {
+      Write-Warning "Startup diagnostics could not be persisted: $($_.Exception.Message)"
+    }
+  }
+  if ($null -ne $layout -and $null -ne $receipt) {
+    try {
+      [void](Remove-MatchingReleaseProcessReceipt `
+          -Layout $layout `
+          -ExpectedReceipt $receipt `
+          -ChildConfirmedExited $childConfirmedExited)
+    } catch {
+      Write-Warning "Failed process receipt could not be removed safely: $($_.Exception.Message)"
+    }
+  }
+  throw $failureRecord
 } finally {
   Exit-DeploymentMutex -Mutex $mutex
 }

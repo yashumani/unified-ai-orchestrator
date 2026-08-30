@@ -721,6 +721,40 @@ function Write-AtomicJson {
   }
 }
 
+function Write-StartupDiagnostic {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$CommitSha,
+    [Parameter(Mandatory)][string]$RunId,
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][ValidateSet("health-waiting", "healthy", "failed")][string]$Phase,
+    [AllowNull()][string]$PreCleanupState,
+    [AllowNull()][string]$PostCleanupState,
+    [AllowNull()][object]$ExitCode,
+    [string]$FailureMessage = "",
+    [Parameter(Mandatory)][string]$StdoutPath,
+    [Parameter(Mandatory)][string]$StderrPath,
+    [Parameter(Mandatory)][bool]$Supervised
+  )
+
+  Write-AtomicJson -Layout $Layout -Path $Path -Value ([ordered]@{
+      schemaVersion = 1
+      commitSha = $CommitSha
+      runId = $RunId
+      pid = $ProcessId
+      recordedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+      phase = $Phase
+      preCleanupState = $PreCleanupState
+      postCleanupState = $PostCleanupState
+      exitCode = $ExitCode
+      failureMessage = $FailureMessage.Substring(0, [Math]::Min(500, $FailureMessage.Length))
+      stdoutPath = $StdoutPath
+      stderrPath = $StderrPath
+      supervised = $Supervised
+    })
+}
+
 function ConvertFrom-DeploymentJsonHashtable {
   param([Parameter(Mandatory)][string]$Json)
 
@@ -4850,6 +4884,103 @@ function Assert-NodeRuntime {
   return $version
 }
 
+function Test-IntegralProcessReceiptValue {
+  param([AllowNull()][object]$Value)
+
+  return (
+    $Value -is [byte] -or
+    $Value -is [sbyte] -or
+    $Value -is [int16] -or
+    $Value -is [uint16] -or
+    $Value -is [int32] -or
+    $Value -is [uint32] -or
+    $Value -is [int64] -or
+    $Value -is [uint64]
+  )
+}
+
+function Get-ReleaseProcessReceiptIdentityText {
+  param([Parameter(Mandatory)][System.Collections.IDictionary]$Receipt)
+
+  $requiredKeys = @(
+    "schemaVersion", "commitSha", "pid", "entrypoint", "nodePath", "nodeVersion",
+    "nodeSha256", "runtimeDependencyReceiptSha256", "startedAtUtc", "stdoutPath",
+    "stderrPath", "supervised"
+  )
+  $actualKeys = @($Receipt.Keys | ForEach-Object { [string]$_ })
+  if ($actualKeys.Count -ne $requiredKeys.Count) {
+    throw "Process receipt identity does not match the exact runtime contract."
+  }
+  foreach ($requiredKey in $requiredKeys) {
+    $ordinalMatches = @(
+      $actualKeys | Where-Object {
+        [string]::Equals($_, $requiredKey, [System.StringComparison]::Ordinal)
+      }
+    )
+    if ($ordinalMatches.Count -ne 1) {
+      throw "Process receipt identity does not match the exact runtime contract."
+    }
+  }
+  if (-not (Test-IntegralProcessReceiptValue -Value $Receipt.schemaVersion) -or
+      -not (Test-IntegralProcessReceiptValue -Value $Receipt.pid) -or
+      $Receipt.supervised -isnot [bool]) {
+    throw "Process receipt identity contains an invalid JSON value type."
+  }
+  foreach ($stringKey in $requiredKeys | Where-Object { $_ -notin @("schemaVersion", "pid", "supervised") }) {
+    if ($Receipt[$stringKey] -isnot [string]) {
+      throw "Process receipt identity contains an invalid JSON value type."
+    }
+  }
+
+  return (([ordered]@{
+        schemaVersion = [int64]$Receipt.schemaVersion
+        commitSha = [string]$Receipt.commitSha
+        pid = [int64]$Receipt.pid
+        entrypoint = [string]$Receipt.entrypoint
+        nodePath = [string]$Receipt.nodePath
+        nodeVersion = [string]$Receipt.nodeVersion
+        nodeSha256 = [string]$Receipt.nodeSha256
+        runtimeDependencyReceiptSha256 = [string]$Receipt.runtimeDependencyReceiptSha256
+        startedAtUtc = [string]$Receipt.startedAtUtc
+        stdoutPath = [string]$Receipt.stdoutPath
+        stderrPath = [string]$Receipt.stderrPath
+        supervised = [bool]$Receipt.supervised
+      }) | ConvertTo-Json -Compress)
+}
+
+function Remove-MatchingReleaseProcessReceipt {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedReceipt,
+    [Parameter(Mandatory)][bool]$ChildConfirmedExited
+  )
+
+  if (-not $ChildConfirmedExited) {
+    return $false
+  }
+
+  $receiptMutex = Enter-DeploymentMutex
+  try {
+    if ([bool]$receiptMutex.WasAbandoned) {
+      Assert-NoDeploymentReparsePoints -Layout $Layout
+    }
+    [void](Assert-ContainedPath -Root $Layout.Root -Path $Layout.Process)
+    if (-not (Test-Path -LiteralPath $Layout.Process -PathType Leaf)) {
+      return $false
+    }
+    $currentReceipt = Read-JsonHashtable -Path $Layout.Process
+    $expectedIdentity = Get-ReleaseProcessReceiptIdentityText -Receipt $ExpectedReceipt
+    $currentIdentity = Get-ReleaseProcessReceiptIdentityText -Receipt $currentReceipt
+    if ($currentIdentity -cne $expectedIdentity) {
+      return $false
+    }
+    Remove-Item -LiteralPath $Layout.Process -Force
+    return $true
+  } finally {
+    Exit-DeploymentMutex -Mutex $receiptMutex
+  }
+}
+
 function Get-LiveReleaseProcess {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
@@ -4914,11 +5045,83 @@ function Get-LiveReleaseProcess {
   return [ordered]@{ receipt = $receipt; process = $process }
 }
 
+function Assert-ObservedReleaseProcessRunning {
+  param([System.Diagnostics.Process]$ObservedProcess)
+
+  if ($null -eq $ObservedProcess) {
+    return
+  }
+  $ObservedProcess.Refresh()
+  if ($ObservedProcess.HasExited) {
+    [void]$ObservedProcess.WaitForExit()
+    throw "Release process exited before health succeeded with code $($ObservedProcess.ExitCode)."
+  }
+}
+
+function Invoke-ObservedReleaseJsonRequest {
+  param(
+    [Parameter(Mandatory)][string]$Uri,
+    [System.Diagnostics.Process]$ObservedProcess,
+    [ValidateRange(100, 5000)][int]$RequestTimeoutMilliseconds = 5000
+  )
+
+  $requestUri = [Uri]$Uri
+  if ($requestUri.Scheme -cne "http" -or $requestUri.Host -cne "127.0.0.1") {
+    throw "Observed release requests are pinned to an HTTP IPv4 loopback endpoint."
+  }
+  Assert-ObservedReleaseProcessRunning -ObservedProcess $ObservedProcess
+
+  $handler = [System.Net.Http.HttpClientHandler]::new()
+  $handler.UseProxy = $false
+  $handler.AllowAutoRedirect = $false
+  $client = [System.Net.Http.HttpClient]::new($handler)
+  $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
+  $request = [System.Net.Http.HttpRequestMessage]::new(
+    [System.Net.Http.HttpMethod]::Get,
+    $requestUri
+  )
+  $request.Headers.Host = $requestUri.Authority
+  $cancellation = [System.Threading.CancellationTokenSource]::new()
+  $response = $null
+  try {
+    $requestTask = $client.SendAsync(
+      $request,
+      [System.Net.Http.HttpCompletionOption]::ResponseContentRead,
+      $cancellation.Token
+    )
+    $requestDeadline = [DateTimeOffset]::UtcNow.AddMilliseconds($RequestTimeoutMilliseconds)
+    while (-not $requestTask.IsCompleted) {
+      Assert-ObservedReleaseProcessRunning -ObservedProcess $ObservedProcess
+      if ([DateTimeOffset]::UtcNow -ge $requestDeadline) {
+        $cancellation.Cancel()
+        throw "Loopback health request exceeded its $RequestTimeoutMilliseconds-millisecond bound."
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    Assert-ObservedReleaseProcessRunning -ObservedProcess $ObservedProcess
+    $response = $requestTask.GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+      throw "Loopback health request returned HTTP $([int]$response.StatusCode)."
+    }
+    $json = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    return (ConvertFrom-DeploymentJsonHashtable -Json $json)
+  } finally {
+    $cancellation.Cancel()
+    if ($null -ne $response) {
+      $response.Dispose()
+    }
+    $request.Dispose()
+    $client.Dispose()
+    $cancellation.Dispose()
+  }
+}
+
 function Wait-ForReleaseHealth {
   param(
     [Parameter(Mandatory)][string]$HealthUri,
     [Parameter(Mandatory)][string]$ExpectedSha,
-    [Parameter(Mandatory)][int]$TimeoutSeconds
+    [Parameter(Mandatory)][int]$TimeoutSeconds,
+    [System.Diagnostics.Process]$ObservedProcess
   )
 
   [void](Assert-CanonicalHealthUri -HealthUri $HealthUri)
@@ -4929,15 +5132,20 @@ function Wait-ForReleaseHealth {
   $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
   $lastError = "health endpoint did not respond"
   do {
+    Assert-ObservedReleaseProcessRunning -ObservedProcess $ObservedProcess
     try {
-      $response = Invoke-RestMethod -Uri $script:CanonicalLivenessUri -Method Get -TimeoutSec 5 -Headers @{ Host = "127.0.0.1:8790" }
+      $response = Invoke-ObservedReleaseJsonRequest `
+        -Uri $script:CanonicalLivenessUri `
+        -ObservedProcess $ObservedProcess
       if (
         [string]$response.status -eq "ok" -and
         [string]$response.app -eq "unified-ai-orchestrator" -and
         [string]$response.mode -eq "local" -and
         [string]$response.model -eq "qwen3:4b"
       ) {
-        $readiness = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 5 -Headers @{ Host = "127.0.0.1:8790" }
+        $readiness = Invoke-ObservedReleaseJsonRequest `
+          -Uri $HealthUri `
+          -ObservedProcess $ObservedProcess
         if (
           [string]$readiness.status -eq "ready" -and
           [string]$readiness.app -eq "unified-ai-orchestrator" -and
@@ -4954,6 +5162,7 @@ function Wait-ForReleaseHealth {
     } catch {
       $lastError = $_.Exception.Message
     }
+    Assert-ObservedReleaseProcessRunning -ObservedProcess $ObservedProcess
     Start-Sleep -Milliseconds 750
   } while ([DateTimeOffset]::UtcNow -lt $deadline)
   throw "Release health check failed: $lastError"

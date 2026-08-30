@@ -473,6 +473,7 @@ describe("Windows local-production deployment contract", () => {
   });
 
   it("starts the selected process before beginning the health wait", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
     const start = await deploymentScript("Start-LocalRelease.ps1");
     const deploy = await deploymentScript("Deploy-LocalRelease.ps1");
     const rollback = await deploymentScript("Rollback-LocalRelease.ps1");
@@ -480,6 +481,38 @@ describe("Windows local-production deployment contract", () => {
     const supervisedHealth = start.indexOf("Wait-ForReleaseHealth", processLaunch);
     expect(processLaunch).toBeGreaterThan(0);
     expect(supervisedHealth).toBeGreaterThan(processLaunch);
+    expect(common).toContain("[System.Diagnostics.Process]$ObservedProcess");
+    expect(common).toContain("$ObservedProcess.HasExited");
+    expect(common).toContain("function Invoke-ObservedReleaseJsonRequest");
+    expect(common).toContain("[System.Net.Http.HttpCompletionOption]::ResponseContentRead");
+    expect(common).toContain("Start-Sleep -Milliseconds 100");
+    expect(common).toContain("function Remove-MatchingReleaseProcessReceipt");
+    expect(common).toContain("$receiptMutex = Enter-DeploymentMutex");
+    expect(common.indexOf("$receiptMutex = Enter-DeploymentMutex")).toBeLessThan(
+      common.indexOf(
+        "Assert-NoDeploymentReparsePoints -Layout $Layout",
+        common.indexOf("$receiptMutex = Enter-DeploymentMutex")
+      )
+    );
+    expect(common.indexOf("$receiptMutex = Enter-DeploymentMutex")).toBeLessThan(
+      common.indexOf(
+        "Assert-ContainedPath -Root $Layout.Root -Path $Layout.Process",
+        common.indexOf("$receiptMutex = Enter-DeploymentMutex")
+      )
+    );
+    expect(start).toContain("-ObservedProcess $child");
+    expect(start).toContain("Remove-MatchingReleaseProcessReceipt");
+    expect(start).toContain("-ChildConfirmedExited $childConfirmedExited");
+    expect(start).not.toContain("[int]$currentReceipt.pid -eq $child.Id");
+    expect(start).toContain('Join-Path $runLogRoot "startup-diagnostic.json"');
+    expect(start).toContain('-Phase "health-waiting"');
+    expect(start).toContain("preCleanupState");
+    expect(start).toContain("postCleanupState");
+    expect(start.indexOf("$failureRecord = $_")).toBeLessThan(
+      start.indexOf("Write-StartupDiagnostic", start.indexOf("$failureRecord = $_"))
+    );
+    expect(start).toContain("throw $failureRecord");
+    expect(start).not.toMatch(/Get-Content[^\n]*(stdout|stderr)/u);
     expect(deploy.indexOf("Wait-ForReleaseHealth")).toBeGreaterThan(
       deploy.indexOf("Start-ScheduledTask")
     );
