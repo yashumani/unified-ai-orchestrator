@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Invoke-GitText {
+function Invoke-RecoveryArtifactGitText {
   param([Parameter(Mandatory)][string[]]$Arguments)
   $output = & git -C $RepositoryRoot @Arguments 2>&1
   if ($LASTEXITCODE -ne 0) {
@@ -20,10 +20,10 @@ function Invoke-GitText {
 }
 
 $resolvedRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path.TrimEnd("\", "/")
-if ((Invoke-GitText -Arguments @("rev-parse", "HEAD")) -cne $CommitSha) {
+if ((Invoke-RecoveryArtifactGitText -Arguments @("rev-parse", "HEAD")) -cne $CommitSha) {
   throw "Recovery controller packaging requires the exact repository HEAD."
 }
-if ((Invoke-GitText -Arguments @("status", "--porcelain=v1", "--untracked-files=all")).Length -ne 0) {
+if ((Invoke-RecoveryArtifactGitText -Arguments @("status", "--porcelain=v1", "--untracked-files=all")).Length -ne 0) {
   throw "Recovery controller packaging requires a clean repository."
 }
 
@@ -32,7 +32,7 @@ $controllerSource = Join-Path $resolvedRoot "scripts\deployment"
 $layout = Get-DeploymentLayout -RepositoryRoot $resolvedRoot
 $receipt = Test-RecoveryControllerManifest -Layout $layout -SourceRoot $controllerSource
 $timestamp = [DateTimeOffset]::Parse(
-  (Invoke-GitText -Arguments @("show", "-s", "--format=%cI", $CommitSha))
+  (Invoke-RecoveryArtifactGitText -Arguments @("show", "-s", "--format=%cI", $CommitSha))
 ).ToUniversalTime()
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
 [void](New-Item -ItemType Directory -Path (Split-Path -Parent $resolvedOutput) -Force)

@@ -169,6 +169,16 @@ describe("Windows local-production deployment contract", () => {
     expect(installer).toContain("-Force");
   });
 
+  it("keeps the recovery artifact Git helper isolated from the dot-sourced controller", async () => {
+    const packager = await readFile(
+      resolve("scripts/release/New-RecoveryControllerArtifact.ps1"),
+      "utf8"
+    );
+    expect(packager).toContain("function Invoke-RecoveryArtifactGitText");
+    expect(packager).not.toContain("function Invoke-GitText");
+    expect(packager.match(/Invoke-RecoveryArtifactGitText/gu)).toHaveLength(4);
+  });
+
   it("binds the controller manifest to the exact six physical script bytes", async () => {
     const manifest = JSON.parse(
       await deploymentScript("controller-manifest.json")
