@@ -68,13 +68,14 @@ try {
   [void](Assert-DeploymentSource -RepositoryRoot $RepositoryRoot -ExpectedSha $ExpectedSha)
   [void](Test-ReleaseArchive -ArtifactPath $ArtifactPath -ExpectedSha $ExpectedSha)
   [void](Assert-DeploymentTaskRegistration -RepositoryRoot $RepositoryRoot -TaskName $TaskName)
-  $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $layout -ExecuteVersionChecks
+  $nodeRuntime = Read-PinnedNodeRuntimeAttestation -Layout $layout
   Write-DeploymentEvent -Layout $layout -Action "deploy" -Status "started" -CommitSha $ExpectedSha -OperationId $operationId -Message "Validated exact-SHA release artifact and canonical main source."
 
   if (Test-Path -LiteralPath $releaseRoot -PathType Container) {
-    [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
-    $runtimeReceipt = Test-RuntimeDependencyIntegrity -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha
-    [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
+    $runtimeReceipt = Test-SealedRuntimeDependencyAttestation `
+      -Layout $layout `
+      -ReleaseRoot $releaseRoot `
+      -ExpectedSha $ExpectedSha
   } else {
     Write-AtomicJson -Layout $layout -Path $layout.ReleaseInstallationPending -Value ([ordered]@{
         schemaVersion = 1
@@ -107,14 +108,12 @@ try {
         throw "npm ci did not produce the release node_modules directory."
       }
       [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
-      $runtimeReceipt = Write-RuntimeDependencyIntegrity `
+      $runtimeReceipt = Write-SealedRuntimeDependencyAttestation `
         -Layout $layout `
         -ReleaseRoot $releaseRoot `
         -ExpectedSha $ExpectedSha `
         -NodePath $nodePath `
         -NpmPath $npmPath
-      [void](Test-RuntimeDependencyIntegrity -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha)
-      Protect-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid)
       Remove-Item -LiteralPath $layout.ReleaseInstallationPending -Force
       $releaseInstallPendingWritten = $false
     } finally {
@@ -128,13 +127,11 @@ try {
   if (Test-Path -LiteralPath $layout.Current -PathType Leaf) {
     $oldPointer = Read-ReleasePointer -Path $layout.Current
     $oldReleaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha ([string]$oldPointer.commitSha)
-    [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $oldReleaseRoot -ExpectedSha ([string]$oldPointer.commitSha))
-    $oldRuntimeReceipt = Test-RuntimeDependencyIntegrity `
+    $oldRuntimeReceipt = Test-SealedRuntimeDependencyAttestation `
       -Layout $layout `
       -ReleaseRoot $oldReleaseRoot `
       -ExpectedSha ([string]$oldPointer.commitSha) `
       -ExpectedReceiptSha256 ([string]$oldPointer.runtimeDependencyReceiptSha256)
-    [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $oldReleaseRoot -IdentitySid ([string]$oldRuntimeReceipt.identitySid))
   }
   if (Test-Path -LiteralPath $layout.Pending -PathType Leaf) {
     throw "An unresolved pending deployment record exists; inspect and recover it before another activation."
@@ -188,7 +185,7 @@ try {
     -TaskName $TaskName
   $releaseAcceptance = ($releaseAcceptanceOutput -join "`n") | ConvertFrom-Json -AsHashtable
   if (-not [bool]$releaseAcceptance.accepted -or [string]$releaseAcceptance.commitSha -cne $ExpectedSha) {
-    throw "Full local-release acceptance did not attest the activated exact SHA."
+    throw "Local-release acceptance did not attest the activated exact SHA."
   }
   $aiAcceptanceOutput = & (Join-Path $controllerRoot "Test-LocalAiRuntime.ps1") `
     -RepositoryRoot $RepositoryRoot `

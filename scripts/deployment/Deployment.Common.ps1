@@ -11,7 +11,8 @@ $script:CanonicalTaskName = "UnifiedAIOrchestrator-Local"
 $script:CanonicalRunnerTaskName = "UnifiedAIOrchestrator-GitHubRunner"
 $script:CanonicalRunnerRepositoryUrl = "https://github.com/yashumani/unified-ai-orchestrator"
 $script:CanonicalIcaclsPath = "C:\Windows\System32\icacls.exe"
-$script:CanonicalControllerVersion = "1.0.0"
+$script:CanonicalControllerVersion = "1.0.1"
+$script:SupportedControllerVersions = @("1.0.0", $script:CanonicalControllerVersion)
 $script:CanonicalDeploymentTaskDescription = "Supervises the loopback-only Unified AI Orchestrator release selected by the repository deployment pointer."
 $script:CanonicalRunnerTaskDescription = "Pinned repository-scoped GitHub Actions runner for Unified AI Orchestrator local production."
 $script:PinnedRunnerVersion = "2.337.0"
@@ -22,6 +23,16 @@ $script:PinnedNodeArchiveName = "node-v22.23.2-win-x64.zip"
 $script:PinnedNodeArchiveSha256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
 $script:PinnedNodeArchiveUrl = "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip"
 $script:ShaPattern = "^[0-9a-f]{40}$"
+$script:RuntimeAttestationKind = "npm-lock-graph-v1"
+$script:RuntimeAttestationGraphTimeoutSeconds = 120
+$script:RuntimeAttestationProtectionTimeoutSeconds = 30
+$script:CriticalReleasePayloadPaths = @(
+  "package.json",
+  "package-lock.json",
+  "apps/api/package.json",
+  "apps/api/dist/server.js",
+  "apps/web/dist/index.html"
+)
 
 function Assert-CanonicalRepositoryRoot {
   param([Parameter(Mandatory)][string]$RepositoryRoot)
@@ -76,6 +87,16 @@ function Assert-CanonicalHealthUri {
   return $HealthUri
 }
 
+function Assert-SupportedControllerVersion {
+  param([Parameter(Mandatory)][string]$ControllerVersion)
+
+  if ($ControllerVersion -cnotmatch "^\d+\.\d+\.\d+$" -or
+      $ControllerVersion -cnotin $script:SupportedControllerVersions) {
+    throw "Recovery controller version is not in the reviewed transition allowlist: $ControllerVersion"
+  }
+  return $ControllerVersion
+}
+
 function Enter-DeploymentMutex {
   param([int]$TimeoutSeconds = 15)
 
@@ -125,6 +146,272 @@ function Exit-DeploymentMutex {
     } finally {
       $Mutex.Dispose()
     }
+  }
+}
+
+function New-BoundedProcessJob {
+  if ($null -eq ("UnifiedAiOrchestratorDeployment.NativeKillOnCloseJob" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace UnifiedAiOrchestratorDeployment
+{
+    public sealed class NativeKillOnCloseJob : IDisposable
+    {
+        private const uint JobObjectExtendedLimitInformation = 9;
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private IntPtr handle;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BasicLimitInformation
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ExtendedLimitInformation
+        {
+            public BasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            uint informationClass,
+            IntPtr information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        public NativeKillOnCloseJob()
+        {
+            handle = CreateJobObject(IntPtr.Zero, null);
+            if (handle == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to create bounded process job.");
+            }
+            var information = new ExtendedLimitInformation();
+            information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            int length = Marshal.SizeOf<ExtendedLimitInformation>();
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                Marshal.StructureToPtr(information, buffer, false);
+                if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, buffer, (uint)length))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to configure bounded process job.");
+                }
+            }
+            catch
+            {
+                CloseHandle(handle);
+                handle = IntPtr.Zero;
+                throw;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public void AddProcess(Process process)
+        {
+            if (handle == IntPtr.Zero || process == null || !AssignProcessToJobObject(handle, process.Handle))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to assign child process to bounded job.");
+            }
+        }
+
+        public void Terminate()
+        {
+            if (handle != IntPtr.Zero && !TerminateJobObject(handle, 1))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to terminate bounded process job.");
+            }
+        }
+
+        public void Dispose()
+        {
+            if (handle != IntPtr.Zero)
+            {
+                CloseHandle(handle);
+                handle = IntPtr.Zero;
+            }
+            GC.SuppressFinalize(this);
+        }
+
+        ~NativeKillOnCloseJob()
+        {
+            Dispose();
+        }
+    }
+}
+'@
+  }
+  return [UnifiedAiOrchestratorDeployment.NativeKillOnCloseJob]::new()
+}
+
+function Invoke-BoundedProcess {
+  param(
+    [Parameter(Mandatory)][string]$FilePath,
+    [Parameter(Mandatory)][string[]]$ArgumentList,
+    [Parameter(Mandatory)][string]$WorkingDirectory,
+    [Parameter(Mandatory)][ValidateRange(1, 300)][int]$TimeoutSeconds,
+    [Parameter(Mandatory)][ValidateRange(1024, 16777216)][int]$MaxOutputCharacters,
+    [Parameter(Mandatory)][string]$Context
+  )
+
+  $resolvedFile = [System.IO.Path]::GetFullPath($FilePath)
+  $resolvedWorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
+  if (-not (Test-Path -LiteralPath $resolvedFile -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) {
+    throw "$Context executable or working directory is unavailable."
+  }
+  foreach ($path in @($resolvedFile, $resolvedWorkingDirectory)) {
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "$Context executable and working directory must not be reparse points."
+    }
+  }
+
+  $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $resolvedFile
+  $startInfo.WorkingDirectory = $resolvedWorkingDirectory
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  foreach ($argument in $ArgumentList) {
+    [void]$startInfo.ArgumentList.Add($argument)
+  }
+
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  $job = $null
+  $timer = [System.Diagnostics.Stopwatch]::StartNew()
+  try {
+    $job = New-BoundedProcessJob
+    if (-not $process.Start()) {
+      throw "$Context did not start."
+    }
+    try {
+      $job.AddProcess($process)
+    } catch {
+      if (-not $process.HasExited) {
+        $process.Kill($true)
+        [void]$process.WaitForExit(10000)
+      }
+      throw "$Context could not enter its kill-on-close job: $($_.Exception.Message)"
+    }
+    $stopProcessTree = {
+      $job.Terminate()
+      if (-not $process.HasExited) {
+        try {
+          $process.Kill($true)
+        } catch {
+          throw "$Context process tree could not be terminated: $($_.Exception.Message)"
+        }
+      }
+      if (-not $process.WaitForExit(10000)) {
+        throw "$Context process tree did not exit after termination."
+      }
+    }
+    $stdoutBuilder = [System.Text.StringBuilder]::new()
+    $stderrBuilder = [System.Text.StringBuilder]::new()
+    $stdoutBuffer = [char[]]::new(4096)
+    $stderrBuffer = [char[]]::new(4096)
+    $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+    $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+    $stdoutDone = $false
+    $stderrDone = $false
+    while (-not ($stdoutDone -and $stderrDone -and $process.HasExited)) {
+      if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+        & $stopProcessTree
+        throw "$Context exceeded its $TimeoutSeconds-second bound."
+      }
+      $madeProgress = $false
+      if (-not $stdoutDone -and $stdoutRead.IsCompleted) {
+        $count = $stdoutRead.GetAwaiter().GetResult()
+        $madeProgress = $true
+        if ($count -eq 0) {
+          $stdoutDone = $true
+        } else {
+          if (($stdoutBuilder.Length + $stderrBuilder.Length + $count) -gt $MaxOutputCharacters) {
+            & $stopProcessTree
+            throw "$Context combined output exceeded its reviewed bound."
+          }
+          [void]$stdoutBuilder.Append($stdoutBuffer, 0, $count)
+          $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+        }
+      }
+      if (-not $stderrDone -and $stderrRead.IsCompleted) {
+        $count = $stderrRead.GetAwaiter().GetResult()
+        $madeProgress = $true
+        if ($count -eq 0) {
+          $stderrDone = $true
+        } else {
+          if (($stdoutBuilder.Length + $stderrBuilder.Length + $count) -gt $MaxOutputCharacters) {
+            & $stopProcessTree
+            throw "$Context combined output exceeded its reviewed bound."
+          }
+          [void]$stderrBuilder.Append($stderrBuffer, 0, $count)
+          $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+        }
+      }
+      if (-not $madeProgress) {
+        [System.Threading.Thread]::Sleep(10)
+      }
+    }
+    [void]$process.WaitForExit()
+    return [ordered]@{
+      exitCode = $process.ExitCode
+      stdout = $stdoutBuilder.ToString()
+      stderr = $stderrBuilder.ToString()
+      elapsedMilliseconds = [int64]$timer.ElapsedMilliseconds
+    }
+  } finally {
+    $timer.Stop()
+    if ($null -ne $job) {
+      $job.Dispose()
+    }
+    $process.Dispose()
   }
 }
 
@@ -748,6 +1035,170 @@ function Test-ReleaseDirectory {
   return $manifest
 }
 
+function Get-CriticalReleasePayloadAttestation {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$ExpectedSha
+  )
+
+  [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
+  $releaseRootFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+  $releaseItem = Get-Item -LiteralPath $releaseRootFull -Force
+  if (-not $releaseItem.PSIsContainer -or
+      ($releaseItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Installed release root must be a non-reparse directory."
+  }
+  $manifestPath = Join-Path $releaseRootFull "release-manifest.json"
+  $manifest = Read-JsonHashtable -Path $manifestPath
+  Assert-ReleaseManifest -Manifest $manifest -ExpectedSha $ExpectedSha
+  $criticalHashes = [ordered]@{}
+  foreach ($relativePath in $script:CriticalReleasePayloadPaths) {
+    $payloadPath = Assert-SafePayloadPath -RelativePath $relativePath -DestinationRoot $releaseRootFull
+    if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
+      throw "Installed release is missing critical payload path $relativePath."
+    }
+    $payloadItem = Get-Item -LiteralPath $payloadPath -Force
+    if (($payloadItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Critical release payload cannot be a reparse point: $relativePath"
+    }
+    $actualHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -cne [string]$manifest.payloadSha256[$relativePath]) {
+      throw "Installed release hash mismatch for critical payload $relativePath."
+    }
+    $criticalHashes[$relativePath] = $actualHash
+  }
+  return [ordered]@{
+    manifest = $manifest
+    manifestPath = $manifestPath
+    releaseManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    packageLockSha256 = [string]$criticalHashes["package-lock.json"]
+    criticalPayloadSha256 = $criticalHashes
+  }
+}
+
+function Get-RuntimeWorkspaceLinkContract {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$PackageLock
+  )
+
+  $releaseRootFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+  $nodeModulesRoot = [System.IO.Path]::GetFullPath((Join-Path $releaseRootFull "node_modules"))
+  if (-not (Test-Path -LiteralPath $nodeModulesRoot -PathType Container)) {
+    throw "Release dependencies are missing. Deploy the release before starting it."
+  }
+  $nodeModulesItem = Get-Item -LiteralPath $nodeModulesRoot -Force
+  if (($nodeModulesItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Release node_modules cannot be a reparse point."
+  }
+  if (-not $PackageLock.Contains("packages") -or
+      $PackageLock.packages -isnot [System.Collections.IDictionary]) {
+    throw "Release package-lock.json does not expose workspace link contracts."
+  }
+
+  $links = [System.Collections.Generic.SortedDictionary[string,object]]::new(
+    [System.StringComparer]::Ordinal
+  )
+  foreach ($package in $PackageLock.packages.GetEnumerator()) {
+    if ($package.Value -isnot [System.Collections.IDictionary] -or
+        -not $package.Value.Contains("link") -or
+        -not [bool]$package.Value.link) {
+      continue
+    }
+    if (-not $package.Value.Contains("resolved")) {
+      throw "Runtime workspace link contract is missing its resolved target."
+    }
+    $linkPath = ([string]$package.Key).Replace("\", "/")
+    $targetRelative = ([string]$package.Value.resolved).Replace("\", "/")
+    if ($linkPath -cnotmatch "^node_modules/@unified-ai/[a-z0-9-]+$" -or
+        $targetRelative -cnotmatch "^(apps|packages|services)/[a-z0-9-]+$") {
+      throw "Runtime workspace link contract is unsafe: $linkPath -> $targetRelative"
+    }
+    $targetPath = [System.IO.Path]::GetFullPath((Join-Path $releaseRootFull $targetRelative))
+    [void](Assert-ContainedPath -Root $releaseRootFull -Path $targetPath)
+    if (-not (Test-Path -LiteralPath $targetPath -PathType Container)) {
+      throw "Runtime workspace link target is missing: $targetRelative"
+    }
+    $targetItem = Get-Item -LiteralPath $targetPath -Force
+    if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Runtime workspace link target must be a non-reparse directory: $targetRelative"
+    }
+
+    $linkFull = [System.IO.Path]::GetFullPath((Join-Path $releaseRootFull $linkPath))
+    $linkParent = Split-Path -Parent $linkFull
+    [void](Assert-ContainedPath -Root $releaseRootFull -Path $linkParent)
+    if (-not (Test-Path -LiteralPath $linkFull -PathType Container)) {
+      throw "Runtime workspace link declared by package-lock.json is missing: $linkPath"
+    }
+    $linkItem = Get-Item -LiteralPath $linkFull -Force
+    if (-not $linkItem.PSIsContainer -or
+        ($linkItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -or
+        [string]$linkItem.LinkType -cne "Junction") {
+      throw "Runtime workspace link is not a directory junction: $linkPath"
+    }
+    $resolvedTarget = $linkItem.ResolveLinkTarget($false)
+    if ($null -eq $resolvedTarget -or
+        -not [string]::Equals(
+          [System.IO.Path]::GetFullPath($resolvedTarget.FullName),
+          $targetPath,
+          [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+      throw "Runtime workspace link target does not match package-lock.json: $linkPath"
+    }
+    if ($links.ContainsKey($linkPath)) {
+      throw "Runtime workspace link contract contains a duplicate: $linkPath"
+    }
+    $links.Add($linkPath, [ordered]@{
+        linkPath = $linkPath
+        linkFullPath = $linkFull
+        targetRelativePath = $targetRelative
+        targetFullPath = $targetPath
+      })
+  }
+  if ($links.Count -eq 0 -or $links.Count -gt 100) {
+    throw "Runtime workspace link count is outside the allowed range."
+  }
+  return [ordered]@{
+    nodeModulesRoot = $nodeModulesRoot
+    count = $links.Count
+    links = @($links.Values)
+  }
+}
+
+function Get-BoundedReleaseCriticalPaths {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$WorkspaceLinks,
+    [switch]$IncludeHiddenPackageLock
+  )
+
+  $releaseRootFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+  $paths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+  )
+  foreach ($relativePath in @("release-manifest.json", "runtime-integrity.json") + $script:CriticalReleasePayloadPaths) {
+    [void]$paths.Add([System.IO.Path]::GetFullPath((Join-Path $releaseRootFull $relativePath)))
+  }
+  [void]$paths.Add([System.IO.Path]::GetFullPath((Join-Path $releaseRootFull "node_modules")))
+  if ($IncludeHiddenPackageLock) {
+    [void]$paths.Add([System.IO.Path]::GetFullPath((Join-Path $releaseRootFull "node_modules\.package-lock.json")))
+  }
+  foreach ($link in @($WorkspaceLinks.links)) {
+    [void]$paths.Add([System.IO.Path]::GetFullPath([string]$link.linkFullPath))
+    [void]$paths.Add([System.IO.Path]::GetFullPath([string]$link.targetFullPath))
+  }
+  if ($paths.Count -lt 8 -or $paths.Count -gt 256) {
+    throw "Bounded release critical-path count is outside the reviewed range."
+  }
+  $orderedPaths = [System.Collections.Generic.List[string]]::new()
+  foreach ($path in $paths) {
+    $orderedPaths.Add($path)
+  }
+  $orderedPaths.Sort([System.StringComparer]::OrdinalIgnoreCase)
+  return @($orderedPaths)
+}
+
 function Get-RuntimeDependencyTreeReceipt {
   param(
     [Parameter(Mandatory)][string]$ReleaseRoot,
@@ -1221,7 +1672,221 @@ function Read-PinnedNodeRuntimeInstallation {
   return $state
 }
 
-function Write-RuntimeDependencyIntegrity {
+function Read-PinnedNodeRuntimeAttestation {
+  param([Parameter(Mandatory)][hashtable]$Layout)
+
+  $state = Read-JsonHashtable -Path $Layout.NodeRuntimeInstallation
+  $requiredKeys = @(
+    "schemaVersion", "version", "archiveSha256", "payloadFileCount", "payloadTreeSha256",
+    "runtimeRoot", "nodePath", "npmPath", "identityName", "identitySid", "installedAtUtc"
+  )
+  $expectedNodePath = Join-Path $Layout.NodeRuntimeRoot "node.exe"
+  $expectedNpmPath = Join-Path $Layout.NodeRuntimeRoot "npm.cmd"
+  if (@($state.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
+      @($requiredKeys | Where-Object { $_ -notin $state.Keys }).Count -ne 0 -or
+      [int]$state.schemaVersion -ne 1 -or
+      [string]$state.version -cne $script:PinnedNodeVersion -or
+      [string]$state.archiveSha256 -cne $script:PinnedNodeArchiveSha256 -or
+      [int]$state.payloadFileCount -lt 1 -or
+      [string]$state.payloadTreeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+      -not [string]::Equals([string]$state.runtimeRoot, $Layout.NodeRuntimeRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+      -not [string]::Equals([string]$state.nodePath, $expectedNodePath, [System.StringComparison]::OrdinalIgnoreCase) -or
+      -not [string]::Equals([string]$state.npmPath, $expectedNpmPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+      [string]$state.identitySid -cnotmatch "^S-1-[0-9-]+$") {
+    throw "Pinned Node.js installation state does not match the reviewed D-backed runtime contract."
+  }
+  [void](Assert-UtcTimestamp -Value ([string]$state.installedAtUtc) -Context "Node.js runtime installedAtUtc")
+  $identity = Get-CurrentWindowsIdentityReceipt
+  if ([string]$state.identitySid -cne [string]$identity.identitySid) {
+    throw "Pinned Node.js runtime was installed for a different Windows identity."
+  }
+
+  $runtimeRoot = [System.IO.Path]::GetFullPath([string]$state.runtimeRoot)
+  [void](Assert-ContainedPath -Root $Layout.Toolchains -Path $runtimeRoot)
+  $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
+  if (-not $runtimeItem.PSIsContainer -or
+      ($runtimeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Pinned Node.js runtime root must be a non-reparse directory."
+  }
+  $npmCliPath = Join-Path $runtimeRoot "node_modules\npm\bin\npm-cli.js"
+  $npmPackagePath = Join-Path $runtimeRoot "node_modules\npm\package.json"
+  foreach ($path in @($expectedNodePath, $expectedNpmPath, $npmCliPath, $npmPackagePath)) {
+    [void](Assert-ContainedPath -Root $runtimeRoot -Path $path)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Pinned Node.js runtime critical file is missing: $path"
+    }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Pinned Node.js runtime critical files cannot be reparse points."
+    }
+  }
+  $npmPackage = Read-JsonHashtable -Path $npmPackagePath
+  if ([string]$npmPackage.name -cne "npm" -or [string]$npmPackage.version -cne "10.9.8") {
+    throw "Pinned npm runtime package identity drifted."
+  }
+  [void](Assert-ProtectedAclContract `
+      -Path $runtimeRoot `
+      -IdentitySid ([string]$state.identitySid) `
+      -IdentityAccess ReadAndExecute `
+      -BoundedPaths @($expectedNodePath, $expectedNpmPath, $npmCliPath, $npmPackagePath))
+
+  return [ordered]@{
+    version = [string]$state.version
+    archiveSha256 = [string]$state.archiveSha256
+    payloadFileCount = [int]$state.payloadFileCount
+    payloadTreeSha256 = [string]$state.payloadTreeSha256
+    runtimeRoot = $runtimeRoot
+    nodePath = [System.IO.Path]::GetFullPath($expectedNodePath)
+    nodeVersion = "v$($script:PinnedNodeVersion)"
+    nodeSha256 = (Get-FileHash -LiteralPath $expectedNodePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    npmPath = [System.IO.Path]::GetFullPath($expectedNpmPath)
+    npmVersion = [string]$npmPackage.version
+    npmSha256 = (Get-FileHash -LiteralPath $expectedNpmPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    npmCliPath = [System.IO.Path]::GetFullPath($npmCliPath)
+    npmCliSha256 = (Get-FileHash -LiteralPath $npmCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    identityName = [string]$state.identityName
+    identitySid = [string]$state.identitySid
+  }
+}
+
+function Get-CanonicalNpmDependencyGraphReceipt {
+  param([Parameter(Mandatory)][System.Collections.IDictionary]$Graph)
+
+  if ($Graph.Contains("error") -or
+      ($Graph.Contains("problems") -and @($Graph.problems).Count -gt 0)) {
+    throw "npm dependency graph reported an invalid installed tree."
+  }
+  $records = [System.Collections.Generic.List[string]]::new()
+  $seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $visit = $null
+  $visit = {
+    param(
+      [Parameter(Mandatory)][System.Collections.IDictionary]$Node,
+      [string[]]$DependencyPath,
+      [Parameter(Mandatory)][int]$Depth
+    )
+
+    if ($Depth -gt 100) {
+      throw "npm dependency graph exceeds the reviewed depth limit."
+    }
+    foreach ($flag in @("missing", "invalid", "extraneous")) {
+      if ($Node.Contains($flag) -and [bool]$Node[$flag]) {
+        throw "npm dependency graph contains a $flag node."
+      }
+    }
+    if (-not $Node.Contains("version")) {
+      throw "npm dependency graph contains a non-empty node without a version."
+    }
+    if ($DependencyPath.Count -eq 0 -and -not $Node.Contains("name")) {
+      throw "npm dependency graph root is missing its package name."
+    }
+    $nodeName = if ($DependencyPath.Count -eq 0) { [string]$Node.name } else { $DependencyPath[-1] }
+    $nodeVersion = [string]$Node.version
+    if ([string]::IsNullOrWhiteSpace($nodeName) -or $nodeName.Length -gt 214 -or
+        $nodeName.Contains("`t") -or $nodeName.Contains("`r") -or $nodeName.Contains("`n") -or
+        [string]::IsNullOrWhiteSpace($nodeVersion) -or $nodeVersion.Length -gt 256 -or
+        $nodeVersion.Contains("`t") -or $nodeVersion.Contains("`r") -or $nodeVersion.Contains("`n")) {
+      throw "npm dependency graph contains an unsafe package identity."
+    }
+    $pathJson = ConvertTo-Json -InputObject @($DependencyPath) -Compress
+    if (-not $seenPaths.Add($pathJson)) {
+      throw "npm dependency graph contains a duplicate logical path."
+    }
+    $records.Add((ConvertTo-Json -InputObject ([ordered]@{
+          path = @($DependencyPath)
+          name = $nodeName
+          version = $nodeVersion
+        }) -Compress -Depth 100))
+    if ($records.Count -gt 100000) {
+      throw "npm dependency graph exceeds the reviewed node-count limit."
+    }
+    if (-not $Node.Contains("dependencies") -or $null -eq $Node.dependencies) {
+      return
+    }
+    if ($Node.dependencies -isnot [System.Collections.IDictionary]) {
+      throw "npm dependency graph dependencies must be an object."
+    }
+    $dependencyNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($dependencyName in $Node.dependencies.Keys) {
+      $dependencyNameText = [string]$dependencyName
+      if ([string]::IsNullOrWhiteSpace($dependencyNameText) -or
+          $dependencyNameText.Contains("`t") -or
+          $dependencyNameText.Contains("`r") -or
+          $dependencyNameText.Contains("`n")) {
+        throw "npm dependency graph contains an unsafe dependency name."
+      }
+      $dependencyNames.Add($dependencyNameText)
+    }
+    $dependencyNames.Sort([System.StringComparer]::Ordinal)
+    foreach ($dependencyName in $dependencyNames) {
+      $child = $Node.dependencies[$dependencyName]
+      if ($child -isnot [System.Collections.IDictionary]) {
+        throw "npm dependency graph child nodes must be objects."
+      }
+      if ($child.Count -eq 0) {
+        # npm emits empty objects for platform-omitted optional dependencies.
+        # They are absence placeholders, not installed dependency nodes.
+        continue
+      }
+      & $visit `
+        -Node $child `
+        -DependencyPath (@($DependencyPath) + @($dependencyName)) `
+        -Depth ($Depth + 1)
+    }
+  }
+
+  & $visit -Node $Graph -DependencyPath @() -Depth 0
+  if ($records.Count -lt 1) {
+    throw "npm dependency graph is empty."
+  }
+  $graphBytes = [System.Text.Encoding]::UTF8.GetBytes(($records -join "`n"))
+  return [ordered]@{
+    dependencyGraphNodeCount = $records.Count
+    dependencyGraphSha256 = [System.Convert]::ToHexString(
+      [System.Security.Cryptography.SHA256]::HashData($graphBytes)
+    ).ToLowerInvariant()
+  }
+}
+
+function Get-PinnedNpmDependencyGraphReceipt {
+  param(
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$NodeRuntime,
+    [ValidateRange(1, 150)][int]$TimeoutSeconds = $script:RuntimeAttestationGraphTimeoutSeconds
+  )
+
+  Write-Host "[runtime-attestation:npm-graph-start] timeoutSeconds=$TimeoutSeconds"
+  $result = Invoke-BoundedProcess `
+    -FilePath ([string]$NodeRuntime.nodePath) `
+    -ArgumentList @(
+      [string]$NodeRuntime.npmCliPath,
+      "ls", "--omit=dev", "--all", "--json"
+    ) `
+    -WorkingDirectory $ReleaseRoot `
+    -TimeoutSeconds $TimeoutSeconds `
+    -MaxOutputCharacters 8388608 `
+    -Context "Pinned npm dependency graph validation"
+  if ([int]$result.exitCode -ne 0) {
+    $stderr = [string]$result.stderr
+    if ($stderr.Length -gt 2000) {
+      $stderr = $stderr.Substring(0, 2000)
+    }
+    throw "Pinned npm dependency graph validation failed with exit code $($result.exitCode): $stderr"
+  }
+  $graph = try {
+    ConvertFrom-Json -InputObject ([string]$result.stdout) -AsHashtable -Depth 100
+  } catch {
+    throw "Pinned npm dependency graph output was not valid bounded JSON: $($_.Exception.Message)"
+  }
+  if ($graph -isnot [System.Collections.IDictionary]) {
+    throw "Pinned npm dependency graph output must be an object."
+  }
+  $receipt = Get-CanonicalNpmDependencyGraphReceipt -Graph $graph
+  Write-Host "[runtime-attestation:npm-graph-complete] elapsedMilliseconds=$($result.elapsedMilliseconds) nodes=$($receipt.dependencyGraphNodeCount)"
+  return $receipt
+}
+
+function Write-SealedRuntimeDependencyAttestation {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
@@ -1231,10 +1896,13 @@ function Write-RuntimeDependencyIntegrity {
   )
 
   [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
-  $releaseManifest = Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha
+  $criticalPayload = Get-CriticalReleasePayloadAttestation `
+    -Layout $Layout `
+    -ReleaseRoot $ReleaseRoot `
+    -ExpectedSha $ExpectedSha
   $NodePath = [System.IO.Path]::GetFullPath($NodePath)
   $NpmPath = [System.IO.Path]::GetFullPath($NpmPath)
-  $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $Layout -ExecuteVersionChecks
+  $nodeRuntime = Read-PinnedNodeRuntimeAttestation -Layout $Layout
   if (-not [string]::Equals($NodePath, [string]$nodeRuntime.nodePath, [System.StringComparison]::OrdinalIgnoreCase) -or
       -not [string]::Equals($NpmPath, [string]$nodeRuntime.npmPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Release installation must use the qualified D-backed Node.js runtime."
@@ -1243,62 +1911,124 @@ function Write-RuntimeDependencyIntegrity {
   if ($nodeVersion -cne "v22.23.2") {
     throw "Release installation requires the exact Node.js runtime v22.23.2; observed $nodeVersion."
   }
-  $npmOutput = @(& $NpmPath --version 2>&1)
-  $npmExitCode = $LASTEXITCODE
-  $npmVersion = ($npmOutput | Select-Object -First 1).ToString().Trim()
-  if ($npmExitCode -ne 0 -or $npmVersion -cne "10.9.8") {
+  if ([string]$nodeRuntime.npmVersion -cne "10.9.8") {
     throw "Unable to attest the pinned npm 10.9.8 runtime."
   }
-  $tree = Get-RuntimeDependencyTreeReceipt -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha
-  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-  if ($null -eq $identity.User -or [string]::IsNullOrWhiteSpace($identity.Name)) {
-    throw "Unable to resolve the release installation identity."
+  $packageLockPath = Join-Path $ReleaseRoot "package-lock.json"
+  $packageLock = Read-JsonHashtable -Path $packageLockPath
+  $workspaceLinks = Get-RuntimeWorkspaceLinkContract -ReleaseRoot $ReleaseRoot -PackageLock $packageLock
+  $graph = Get-PinnedNpmDependencyGraphReceipt -ReleaseRoot $ReleaseRoot -NodeRuntime $nodeRuntime
+  $hiddenPackageLockPath = Join-Path $ReleaseRoot "node_modules\.package-lock.json"
+  $hiddenPackageLockSha256 = $null
+  if (Test-Path -LiteralPath $hiddenPackageLockPath -PathType Leaf) {
+    $hiddenPackageLockItem = Get-Item -LiteralPath $hiddenPackageLockPath -Force
+    if (($hiddenPackageLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Installed hidden package lock cannot be a reparse point."
+    }
+    $hiddenPackageLockSha256 = (Get-FileHash -LiteralPath $hiddenPackageLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
+  $identity = Get-CurrentWindowsIdentityReceipt
   $receipt = [ordered]@{
-    schemaVersion = 3
+    schemaVersion = 4
+    attestationKind = $script:RuntimeAttestationKind
     commitSha = $ExpectedSha
-    packageLockSha256 = [string]$releaseManifest.packageLockSha256
+    releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256
+    packageLockSha256 = [string]$criticalPayload.packageLockSha256
+    criticalPayloadSha256 = $criticalPayload.criticalPayloadSha256
+    hiddenPackageLockSha256 = $hiddenPackageLockSha256
     nodePath = $NodePath
     nodeVersion = $nodeVersion
-    nodeSha256 = (Get-FileHash -LiteralPath $NodePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    nodeSha256 = [string]$nodeRuntime.nodeSha256
+    npmPath = $NpmPath
+    npmVersion = [string]$nodeRuntime.npmVersion
+    npmSha256 = [string]$nodeRuntime.npmSha256
+    npmCliPath = [string]$nodeRuntime.npmCliPath
+    npmCliSha256 = [string]$nodeRuntime.npmCliSha256
     nodeRuntimeArchiveSha256 = [string]$nodeRuntime.archiveSha256
     nodeRuntimeFileCount = [int]$nodeRuntime.payloadFileCount
     nodeRuntimeTreeSha256 = [string]$nodeRuntime.payloadTreeSha256
-    identityName = $identity.Name
-    identitySid = $identity.User.Value
-    entryCount = [int]$tree.entryCount
-    fileCount = [int]$tree.fileCount
-    directoryCount = [int]$tree.directoryCount
-    linkCount = [int]$tree.linkCount
-    totalBytes = [uint64]$tree.totalBytes
-    treeSha256 = [string]$tree.treeSha256
+    identityName = [string]$identity.identityName
+    identitySid = [string]$identity.identitySid
+    dependencyGraphNodeCount = [int]$graph.dependencyGraphNodeCount
+    dependencyGraphSha256 = [string]$graph.dependencyGraphSha256
+    workspaceLinkCount = [int]$workspaceLinks.count
   }
   $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
-  Write-AtomicJson -Layout $Layout -Path $receiptPath -Value $receipt
-  $receiptSha256 = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if (Test-Path -LiteralPath $receiptPath) {
+    throw "Runtime dependency attestation receipt already exists; immutable releases cannot be rewritten."
+  }
   $sealPath = Assert-ContainedPath `
     -Root $Layout.RuntimeIntegrity `
     -Path (Join-Path $Layout.RuntimeIntegrity "$ExpectedSha.json")
   if (Test-Path -LiteralPath $sealPath) {
-    throw "Runtime dependency integrity seal already exists; immutable releases cannot be resealed."
+    throw "Runtime dependency attestation seal already exists; immutable releases cannot be resealed."
   }
+  Write-AtomicJson -Layout $Layout -Path $receiptPath -Value $receipt
+  $receiptSha256 = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $criticalPaths = @(Get-BoundedReleaseCriticalPaths `
+      -ReleaseRoot $ReleaseRoot `
+      -WorkspaceLinks $workspaceLinks `
+      -IncludeHiddenPackageLock:($null -ne $hiddenPackageLockSha256))
+  Write-Host "[runtime-attestation:release-protection-start] timeoutSeconds=$script:RuntimeAttestationProtectionTimeoutSeconds"
+  Protect-ReleaseDirectory `
+    -Layout $Layout `
+    -ReleaseRoot $ReleaseRoot `
+    -IdentitySid ([string]$identity.identitySid) `
+    -CriticalPaths $criticalPaths
+  Write-Host "[runtime-attestation:release-protection-complete]"
   Write-AtomicJson -Layout $Layout -Path $sealPath -Value ([ordered]@{
-      schemaVersion = 1
+      schemaVersion = 2
+      attestationKind = $script:RuntimeAttestationKind
       commitSha = $ExpectedSha
       runtimeIntegritySha256 = $receiptSha256
-      treeSha256 = [string]$tree.treeSha256
+      dependencyGraphSha256 = [string]$graph.dependencyGraphSha256
+      releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256
       createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     })
-  $sealAclOutput = & $script:CanonicalIcaclsPath $sealPath /inheritance:r /grant:r "*$($identity.User.Value):RX" "*S-1-5-18:F" /Q 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw "Unable to seal runtime dependency receipt: $($sealAclOutput -join [Environment]::NewLine)"
+  $sealAcl = Invoke-BoundedProcess `
+    -FilePath $script:CanonicalIcaclsPath `
+    -ArgumentList @(
+      $sealPath,
+      "/inheritance:r",
+      "/grant:r",
+      "*$([string]$identity.identitySid):RX",
+      "*S-1-5-18:F",
+      "/Q"
+    ) `
+    -WorkingDirectory $Layout.RuntimeIntegrity `
+    -TimeoutSeconds $script:RuntimeAttestationProtectionTimeoutSeconds `
+    -MaxOutputCharacters 1048576 `
+    -Context "Runtime dependency attestation seal protection"
+  if ([int]$sealAcl.exitCode -ne 0) {
+    throw "Unable to seal runtime dependency receipt: $([string]$sealAcl.stderr)"
   }
-  [void](Assert-IntegritySealProtection -Path $sealPath -IdentitySid $identity.User.Value)
-  $receipt["runtimeIntegritySha256"] = $receiptSha256
-  return $receipt
+  [void](Assert-IntegritySealProtection -Path $sealPath -IdentitySid ([string]$identity.identitySid))
+  Write-Host "[runtime-attestation:seal-complete] receiptSha256=$receiptSha256"
+  return (Test-SealedRuntimeDependencyAttestation `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -ExpectedSha $ExpectedSha `
+      -ExpectedReceiptSha256 $receiptSha256)
 }
 
-function Test-RuntimeDependencyIntegrity {
+function Write-RuntimeDependencyIntegrity {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [Parameter(Mandatory)][string]$NodePath,
+    [Parameter(Mandatory)][string]$NpmPath
+  )
+
+  return (Write-SealedRuntimeDependencyAttestation `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -ExpectedSha $ExpectedSha `
+      -NodePath $NodePath `
+      -NpmPath $NpmPath)
+}
+
+function Test-SealedRuntimeDependencyAttestation {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
@@ -1307,83 +2037,248 @@ function Test-RuntimeDependencyIntegrity {
   )
 
   [void](Assert-ContainedPath -Root $Layout.Root -Path $ReleaseRoot)
-  $releaseManifest = Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha
+  $criticalPayload = Get-CriticalReleasePayloadAttestation `
+    -Layout $Layout `
+    -ReleaseRoot $ReleaseRoot `
+    -ExpectedSha $ExpectedSha
+  $packageLock = Read-JsonHashtable -Path (Join-Path $ReleaseRoot "package-lock.json")
+  $workspaceLinks = Get-RuntimeWorkspaceLinkContract -ReleaseRoot $ReleaseRoot -PackageLock $packageLock
   $receiptPath = Join-Path $ReleaseRoot "runtime-integrity.json"
   $receipt = Read-JsonHashtable -Path $receiptPath
-  $requiredKeys = @(
-    "schemaVersion", "commitSha", "packageLockSha256", "nodePath", "nodeVersion",
-    "nodeSha256", "nodeRuntimeArchiveSha256", "nodeRuntimeFileCount", "nodeRuntimeTreeSha256",
-    "identityName", "identitySid",
-    "entryCount", "fileCount", "directoryCount", "linkCount", "totalBytes", "treeSha256"
-  )
-  if (@($receipt.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
-      @($requiredKeys | Where-Object { $_ -notin $receipt.Keys }).Count -ne 0 -or
-      [int]$receipt.schemaVersion -ne 3 -or
-      [string]$receipt.commitSha -cne $ExpectedSha -or
-      [string]$receipt.packageLockSha256 -cne [string]$releaseManifest.packageLockSha256 -or
-      [string]$receipt.nodeVersion -cne "v22.23.2" -or
+  $legacyReceipt = [int]$receipt.schemaVersion -eq 3
+  if ($legacyReceipt) {
+    $requiredKeys = @(
+      "schemaVersion", "commitSha", "packageLockSha256", "nodePath", "nodeVersion",
+      "nodeSha256", "nodeRuntimeArchiveSha256", "nodeRuntimeFileCount", "nodeRuntimeTreeSha256",
+      "identityName", "identitySid",
+      "entryCount", "fileCount", "directoryCount", "linkCount", "totalBytes", "treeSha256"
+    )
+    if (@($receipt.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
+        @($requiredKeys | Where-Object { $_ -notin $receipt.Keys }).Count -ne 0 -or
+        [string]$receipt.treeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        [int]$receipt.entryCount -lt 1 -or [int]$receipt.fileCount -lt 1 -or
+        [int]$receipt.linkCount -ne [int]$workspaceLinks.count) {
+      throw "Legacy runtime dependency integrity receipt is invalid."
+    }
+  } else {
+    $requiredKeys = @(
+      "schemaVersion", "attestationKind", "commitSha", "releaseManifestSha256",
+      "packageLockSha256", "criticalPayloadSha256", "hiddenPackageLockSha256",
+      "nodePath", "nodeVersion", "nodeSha256", "npmPath", "npmVersion", "npmSha256",
+      "npmCliPath", "npmCliSha256", "nodeRuntimeArchiveSha256", "nodeRuntimeFileCount",
+      "nodeRuntimeTreeSha256", "identityName", "identitySid", "dependencyGraphNodeCount",
+      "dependencyGraphSha256", "workspaceLinkCount"
+    )
+    if (@($receipt.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
+        @($requiredKeys | Where-Object { $_ -notin $receipt.Keys }).Count -ne 0 -or
+        [int]$receipt.schemaVersion -ne 4 -or
+        [string]$receipt.attestationKind -cne $script:RuntimeAttestationKind -or
+        [string]$receipt.releaseManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        $receipt.criticalPayloadSha256 -isnot [System.Collections.IDictionary] -or
+        [string]$receipt.npmVersion -cne "10.9.8" -or
+        [string]$receipt.npmSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        [string]$receipt.npmCliSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        [int]$receipt.dependencyGraphNodeCount -lt 1 -or
+        [int]$receipt.dependencyGraphNodeCount -gt 100000 -or
+        [string]$receipt.dependencyGraphSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        [int]$receipt.workspaceLinkCount -ne [int]$workspaceLinks.count) {
+      throw "Runtime dependency attestation receipt does not match the bounded graph contract."
+    }
+    $criticalKeys = @($script:CriticalReleasePayloadPaths)
+    if (@($receipt.criticalPayloadSha256.Keys | Where-Object { $_ -notin $criticalKeys }).Count -ne 0 -or
+        @($criticalKeys | Where-Object { $_ -notin $receipt.criticalPayloadSha256.Keys }).Count -ne 0) {
+      throw "Runtime dependency attestation critical-payload contract drifted."
+    }
+    foreach ($criticalPath in $criticalKeys) {
+      if ([string]$receipt.criticalPayloadSha256[$criticalPath] -cne
+          [string]$criticalPayload.criticalPayloadSha256[$criticalPath]) {
+        throw "Runtime dependency attestation critical payload drifted: $criticalPath"
+      }
+    }
+    if ([string]$receipt.releaseManifestSha256 -cne [string]$criticalPayload.releaseManifestSha256) {
+      throw "Runtime dependency attestation release manifest drifted."
+    }
+  }
+  if ([string]$receipt.commitSha -cne $ExpectedSha -or
+      [string]$receipt.packageLockSha256 -cne [string]$criticalPayload.packageLockSha256 -or
+      [string]$receipt.nodeVersion -cne "v$($script:PinnedNodeVersion)" -or
       [string]$receipt.nodeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
       [string]$receipt.nodeRuntimeArchiveSha256 -cne $script:PinnedNodeArchiveSha256 -or
       [int]$receipt.nodeRuntimeFileCount -lt 1 -or
       [string]$receipt.nodeRuntimeTreeSha256 -cnotmatch "^[0-9a-f]{64}$" -or
-      [string]$receipt.identitySid -cnotmatch "^S-1-[0-9-]+$" -or
-      [string]$receipt.treeSha256 -cnotmatch "^[0-9a-f]{64}$") {
-    throw "Runtime dependency integrity receipt does not match the selected release."
+      [string]$receipt.identitySid -cnotmatch "^S-1-[0-9-]+$") {
+    throw "Runtime dependency attestation receipt does not match the selected release."
   }
   $sealPath = Assert-ContainedPath `
     -Root $Layout.RuntimeIntegrity `
     -Path (Join-Path $Layout.RuntimeIntegrity "$ExpectedSha.json")
   $seal = Read-JsonHashtable -Path $sealPath
   [void](Assert-IntegritySealProtection -Path $sealPath -IdentitySid ([string]$receipt.identitySid))
-  $sealKeys = @("schemaVersion", "commitSha", "runtimeIntegritySha256", "treeSha256", "createdAtUtc")
   $receiptSha256 = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if (-not [string]::IsNullOrWhiteSpace($ExpectedReceiptSha256) -and
       ($ExpectedReceiptSha256 -cnotmatch "^[0-9a-f]{64}$" -or $receiptSha256 -cne $ExpectedReceiptSha256)) {
     throw "Runtime dependency receipt does not match the release pointer."
   }
-  if (@($seal.Keys | Where-Object { $_ -notin $sealKeys }).Count -ne 0 -or
-      @($sealKeys | Where-Object { $_ -notin $seal.Keys }).Count -ne 0 -or
-      [int]$seal.schemaVersion -ne 1 -or
-      [string]$seal.commitSha -cne $ExpectedSha -or
-      [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
-      [string]$seal.treeSha256 -cne [string]$receipt.treeSha256) {
-    throw "External runtime dependency seal does not match the immutable release receipt."
+  if ($legacyReceipt) {
+    $sealKeys = @("schemaVersion", "commitSha", "runtimeIntegritySha256", "treeSha256", "createdAtUtc")
+    if (@($seal.Keys | Where-Object { $_ -notin $sealKeys }).Count -ne 0 -or
+        @($sealKeys | Where-Object { $_ -notin $seal.Keys }).Count -ne 0 -or
+        [int]$seal.schemaVersion -ne 1 -or
+        [string]$seal.commitSha -cne $ExpectedSha -or
+        [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
+        [string]$seal.treeSha256 -cne [string]$receipt.treeSha256) {
+      throw "Legacy external runtime dependency seal does not match the immutable release receipt."
+    }
+  } else {
+    $sealKeys = @(
+      "schemaVersion", "attestationKind", "commitSha", "runtimeIntegritySha256",
+      "dependencyGraphSha256", "releaseManifestSha256", "createdAtUtc"
+    )
+    if (@($seal.Keys | Where-Object { $_ -notin $sealKeys }).Count -ne 0 -or
+        @($sealKeys | Where-Object { $_ -notin $seal.Keys }).Count -ne 0 -or
+        [int]$seal.schemaVersion -ne 2 -or
+        [string]$seal.attestationKind -cne $script:RuntimeAttestationKind -or
+        [string]$seal.commitSha -cne $ExpectedSha -or
+        [string]$seal.runtimeIntegritySha256 -cne $receiptSha256 -or
+        [string]$seal.dependencyGraphSha256 -cne [string]$receipt.dependencyGraphSha256 -or
+        [string]$seal.releaseManifestSha256 -cne [string]$receipt.releaseManifestSha256) {
+      throw "External runtime dependency attestation seal does not match the immutable release receipt."
+    }
   }
+  [void](Assert-UtcTimestamp -Value ([string]$seal.createdAtUtc) -Context "Runtime dependency seal createdAtUtc")
   $currentIdentity = Get-CurrentWindowsIdentityReceipt
   if ([string]$receipt.identitySid -cne [string]$currentIdentity.identitySid) {
     throw "Runtime dependencies were installed by a different Windows identity."
   }
-  $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $Layout
+  $nodeRuntime = Read-PinnedNodeRuntimeAttestation -Layout $Layout
   if ([int]$receipt.nodeRuntimeFileCount -ne [int]$nodeRuntime.payloadFileCount -or
       [string]$receipt.nodeRuntimeTreeSha256 -cne [string]$nodeRuntime.payloadTreeSha256 -or
       -not [string]::Equals(
         [string]$receipt.nodePath,
         [string]$nodeRuntime.nodePath,
-        [System.StringComparison]::OrdinalIgnoreCase
+       [System.StringComparison]::OrdinalIgnoreCase
       )) {
     throw "Release runtime receipt is not bound to the qualified D-backed Node.js runtime."
   }
-  $nodePath = [string]$receipt.nodePath
-  if (-not [System.IO.Path]::IsPathFullyQualified($nodePath) -or
-      -not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
-    throw "Recorded Node.js runtime executable is unavailable."
-  }
-  $nodeItem = Get-Item -LiteralPath $nodePath -Force
-  if (($nodeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-      (Get-FileHash -LiteralPath $nodePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$receipt.nodeSha256) {
+  if ([string]$receipt.nodeSha256 -cne [string]$nodeRuntime.nodeSha256) {
     throw "Pinned Node.js runtime failed integrity verification."
   }
-  $tree = Get-RuntimeDependencyTreeReceipt -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha
-  if ([int]$receipt.entryCount -ne [int]$tree.entryCount -or
-      [int]$receipt.fileCount -ne [int]$tree.fileCount -or
-      [int]$receipt.directoryCount -ne [int]$tree.directoryCount -or
-      [int]$receipt.linkCount -ne [int]$tree.linkCount -or
-      [uint64]$receipt.totalBytes -ne [uint64]$tree.totalBytes -or
-      [string]$receipt.treeSha256 -cne [string]$tree.treeSha256) {
-    throw "Installed runtime dependency tree failed SHA-256 integrity verification."
+  $includeHiddenPackageLock = $false
+  if (-not $legacyReceipt) {
+    if (-not [string]::Equals([string]$receipt.npmPath, [string]$nodeRuntime.npmPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$receipt.npmCliPath, [string]$nodeRuntime.npmCliPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$receipt.npmSha256 -cne [string]$nodeRuntime.npmSha256 -or
+        [string]$receipt.npmCliSha256 -cne [string]$nodeRuntime.npmCliSha256) {
+      throw "Pinned npm runtime failed bounded integrity verification."
+    }
+    $hiddenPackageLockPath = Join-Path $ReleaseRoot "node_modules\.package-lock.json"
+    if ($null -eq $receipt.hiddenPackageLockSha256) {
+      if (Test-Path -LiteralPath $hiddenPackageLockPath) {
+        throw "Installed hidden package lock appeared after the release was attested."
+      }
+    } else {
+      if ([string]$receipt.hiddenPackageLockSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+          -not (Test-Path -LiteralPath $hiddenPackageLockPath -PathType Leaf)) {
+        throw "Installed hidden package lock does not match the sealed receipt."
+      }
+      $hiddenItem = Get-Item -LiteralPath $hiddenPackageLockPath -Force
+      if (($hiddenItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+          (Get-FileHash -LiteralPath $hiddenPackageLockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$receipt.hiddenPackageLockSha256) {
+        throw "Installed hidden package lock failed SHA-256 verification."
+      }
+      $includeHiddenPackageLock = $true
+    }
+  }
+  $criticalPaths = @(Get-BoundedReleaseCriticalPaths `
+      -ReleaseRoot $ReleaseRoot `
+      -WorkspaceLinks $workspaceLinks `
+      -IncludeHiddenPackageLock:$includeHiddenPackageLock)
+  [void](Assert-BoundedReleaseDirectoryProtection `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -IdentitySid ([string]$receipt.identitySid) `
+      -CriticalPaths $criticalPaths)
+  if ($legacyReceipt) {
+    $receipt["attestationKind"] = "legacy-full-tree-sha256"
   }
   $receipt["runtimeIntegritySha256"] = $receiptSha256
+  $receipt["attestationMode"] = "sealed"
+  $receipt["criticalPathCount"] = $criticalPaths.Count
   return $receipt
+}
+
+function Test-RuntimeDependencyIntegrityFullAudit {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [string]$ExpectedReceiptSha256,
+    [string]$ExpectedTreeSha256
+  )
+
+  $receipt = Test-SealedRuntimeDependencyAttestation `
+    -Layout $Layout `
+    -ReleaseRoot $ReleaseRoot `
+    -ExpectedSha $ExpectedSha `
+    -ExpectedReceiptSha256 $ExpectedReceiptSha256
+  if (-not [string]::IsNullOrWhiteSpace($ExpectedTreeSha256) -and
+      $ExpectedTreeSha256 -cnotmatch "^[0-9a-f]{64}$") {
+    throw "Expected full-audit tree SHA-256 is invalid."
+  }
+  if ([int]$receipt.schemaVersion -eq 4 -and
+      [string]::IsNullOrWhiteSpace($ExpectedTreeSha256)) {
+    throw "Schema 4 full audit requires an externally trusted expected tree SHA-256."
+  }
+  [void](Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha)
+  $nodeRuntime = Read-PinnedNodeRuntimeInstallation -Layout $Layout
+  if ([int]$receipt.nodeRuntimeFileCount -ne [int]$nodeRuntime.payloadFileCount -or
+      [string]$receipt.nodeRuntimeTreeSha256 -cne [string]$nodeRuntime.payloadTreeSha256) {
+    throw "Pinned Node.js runtime failed full-file audit."
+  }
+  $tree = Get-RuntimeDependencyTreeReceipt -ReleaseRoot $ReleaseRoot -ExpectedSha $ExpectedSha
+  if ([int]$receipt.schemaVersion -eq 3 -and
+      ([int]$receipt.entryCount -ne [int]$tree.entryCount -or
+       [int]$receipt.fileCount -ne [int]$tree.fileCount -or
+       [int]$receipt.directoryCount -ne [int]$tree.directoryCount -or
+       [int]$receipt.linkCount -ne [int]$tree.linkCount -or
+       [uint64]$receipt.totalBytes -ne [uint64]$tree.totalBytes -or
+       [string]$receipt.treeSha256 -cne [string]$tree.treeSha256)) {
+    throw "Installed legacy runtime dependency tree failed its sealed full-file audit."
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ExpectedTreeSha256) -and
+      [string]$tree.treeSha256 -cne $ExpectedTreeSha256) {
+    throw "Installed runtime dependency tree failed the requested full-file audit baseline."
+  }
+  [void](Assert-ReleaseDirectoryProtection `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -IdentitySid ([string]$receipt.identitySid))
+  $receipt["attestationMode"] = "full-audit"
+  $receipt["fullAuditEntryCount"] = [int]$tree.entryCount
+  $receipt["fullAuditFileCount"] = [int]$tree.fileCount
+  $receipt["fullAuditDirectoryCount"] = [int]$tree.directoryCount
+  $receipt["fullAuditLinkCount"] = [int]$tree.linkCount
+  $receipt["fullAuditTotalBytes"] = [uint64]$tree.totalBytes
+  $receipt["fullAuditTreeSha256"] = [string]$tree.treeSha256
+  return $receipt
+}
+
+function Test-RuntimeDependencyIntegrity {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [string]$ExpectedReceiptSha256,
+    [string]$ExpectedTreeSha256
+  )
+
+  return (Test-RuntimeDependencyIntegrityFullAudit `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -ExpectedSha $ExpectedSha `
+      -ExpectedReceiptSha256 $ExpectedReceiptSha256 `
+      -ExpectedTreeSha256 $ExpectedTreeSha256)
 }
 
 function Assert-ProtectedAclContract {
@@ -1391,7 +2286,8 @@ function Assert-ProtectedAclContract {
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][string]$IdentitySid,
     [Parameter(Mandatory)][ValidateSet("ReadAndExecute", "FullControl")][string]$IdentityAccess,
-    [switch]$Recursive
+    [switch]$Recursive,
+    [string[]]$BoundedPaths = @()
   )
 
   if (-not (Test-Path -LiteralPath $script:CanonicalIcaclsPath -PathType Leaf)) {
@@ -1400,11 +2296,35 @@ function Assert-ProtectedAclContract {
   if (-not (Test-Path -LiteralPath $Path) -or $IdentitySid -cnotmatch "^S-1-[0-9-]+$") {
     throw "Protected ACL path or identity is invalid."
   }
+  if ($Recursive -and $BoundedPaths.Count -gt 0) {
+    throw "Protected ACL validation cannot be both recursive and bounded."
+  }
+  $rootFull = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+  $rootItem = Get-Item -LiteralPath $rootFull -Force
+  if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Protected ACL root must not be a reparse point: $rootFull"
+  }
   $paths = [System.Collections.Generic.List[string]]::new()
-  $paths.Add([System.IO.Path]::GetFullPath($Path))
+  $pathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $paths.Add($rootFull)
+  [void]$pathSet.Add($rootFull)
   if ($Recursive) {
-    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+    foreach ($item in @(Get-ChildItem -LiteralPath $rootFull -Recurse -Force)) {
       $paths.Add([System.IO.Path]::GetFullPath($item.FullName))
+    }
+  } else {
+    if ($BoundedPaths.Count -gt 256) {
+      throw "Bounded protected ACL path count exceeds the reviewed limit."
+    }
+    foreach ($boundedPath in $BoundedPaths) {
+      $boundedFull = [System.IO.Path]::GetFullPath($boundedPath).TrimEnd("\")
+      if (-not $boundedFull.StartsWith("$rootFull\", [System.StringComparison]::OrdinalIgnoreCase) -or
+          -not (Test-Path -LiteralPath $boundedFull)) {
+        throw "Bounded protected ACL path is missing or outside its root: $boundedFull"
+      }
+      if ($pathSet.Add($boundedFull)) {
+        $paths.Add($boundedFull)
+      }
     }
   }
   if ($paths.Count -gt 300000) {
@@ -1418,7 +2338,11 @@ function Assert-ProtectedAclContract {
     [System.Security.AccessControl.FileSystemRights]::TakeOwnership
   for ($pathIndex = 0; $pathIndex -lt $paths.Count; $pathIndex++) {
     $protectedPath = $paths[$pathIndex]
-    $isRootPath = $pathIndex -eq 0
+    $isRootPath = [string]::Equals(
+      $protectedPath,
+      $rootFull,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )
     $acl = Get-Acl -LiteralPath $protectedPath
     if (($isRootPath -and -not $acl.AreAccessRulesProtected) -or
         (-not $isRootPath -and $acl.AreAccessRulesProtected)) {
@@ -1476,21 +2400,55 @@ function Protect-ReleaseDirectory {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ReleaseRoot,
-    [Parameter(Mandatory)][string]$IdentitySid
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][string[]]$CriticalPaths
   )
 
   [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
   if ($IdentitySid -cnotmatch "^S-1-[0-9-]+$") {
     throw "Release protection identity SID is invalid."
   }
-  $aclOutput = & $script:CanonicalIcaclsPath $ReleaseRoot /reset /T /C /Q 2>&1
-  if ($LASTEXITCODE -eq 0) {
-    $aclOutput += & $script:CanonicalIcaclsPath $ReleaseRoot /inheritance:r /grant:r "*$($IdentitySid):(OI)(CI)RX" "*S-1-5-18:(OI)(CI)F" /Q 2>&1
+  $aclResult = Invoke-BoundedProcess `
+    -FilePath $script:CanonicalIcaclsPath `
+    -ArgumentList @(
+      $ReleaseRoot,
+      "/inheritance:r",
+      "/grant:r",
+      "*$($IdentitySid):(OI)(CI)RX",
+      "*S-1-5-18:(OI)(CI)F",
+      "/Q"
+    ) `
+    -WorkingDirectory $Layout.Releases `
+    -TimeoutSeconds $script:RuntimeAttestationProtectionTimeoutSeconds `
+    -MaxOutputCharacters 1048576 `
+    -Context "Release root ACL protection"
+  if ([int]$aclResult.exitCode -ne 0) {
+    throw "Unable to seal release directory read-only: $([string]$aclResult.stderr)"
   }
-  if ($LASTEXITCODE -ne 0) {
-    throw "Unable to seal release directory read-only: $($aclOutput -join [Environment]::NewLine)"
+  [void](Assert-BoundedReleaseDirectoryProtection `
+      -Layout $Layout `
+      -ReleaseRoot $ReleaseRoot `
+      -IdentitySid $IdentitySid `
+      -CriticalPaths $CriticalPaths)
+}
+
+function Assert-BoundedReleaseDirectoryProtection {
+  param(
+    [Parameter(Mandatory)][hashtable]$Layout,
+    [Parameter(Mandatory)][string]$ReleaseRoot,
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [Parameter(Mandatory)][string[]]$CriticalPaths
+  )
+
+  [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
+  if ($CriticalPaths.Count -lt 8 -or $CriticalPaths.Count -gt 256) {
+    throw "Bounded release ACL verification path count is outside the reviewed range."
   }
-  [void](Assert-ReleaseDirectoryProtection -Layout $Layout -ReleaseRoot $ReleaseRoot -IdentitySid $IdentitySid)
+  return (Assert-ProtectedAclContract `
+      -Path $ReleaseRoot `
+      -IdentitySid $IdentitySid `
+      -IdentityAccess ReadAndExecute `
+      -BoundedPaths $CriticalPaths)
 }
 
 function Assert-ReleaseDirectoryProtection {
@@ -1511,9 +2469,11 @@ function Assert-ReleaseDirectoryProtection {
 function Test-RecoveryControllerManifest {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
-    [Parameter(Mandatory)][string]$SourceRoot
+    [Parameter(Mandatory)][string]$SourceRoot,
+    [string]$ExpectedControllerVersion = $script:CanonicalControllerVersion
   )
 
+  [void](Assert-SupportedControllerVersion -ControllerVersion $ExpectedControllerVersion)
   $source = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd("\")
   if (-not (Test-Path -LiteralPath $source -PathType Container)) {
     throw "Recovery controller source does not exist: $source"
@@ -1543,7 +2503,7 @@ function Test-RecoveryControllerManifest {
   if (@($manifest.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
       @($requiredKeys | Where-Object { $_ -notin $manifest.Keys }).Count -ne 0 -or
       [int]$manifest.schemaVersion -ne 1 -or
-      [string]$manifest.controllerVersion -cne $script:CanonicalControllerVersion -or
+      [string]$manifest.controllerVersion -cne $ExpectedControllerVersion -or
       $manifest.files -isnot [System.Collections.IDictionary] -or
       @($manifest.files.Keys | Where-Object { $_ -notin $requiredFiles }).Count -ne 0 -or
       @($requiredFiles | Where-Object { $_ -notin $manifest.files.Keys }).Count -ne 0) {
@@ -1584,8 +2544,8 @@ function Get-RecoveryControllerRoot {
     [Parameter(Mandatory)][string]$ControllerManifestSha256
   )
 
-  if ($ControllerVersion -cne $script:CanonicalControllerVersion -or
-      $ControllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$") {
+  [void](Assert-SupportedControllerVersion -ControllerVersion $ControllerVersion)
+  if ($ControllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$") {
     throw "Recovery controller identity is invalid."
   }
   return (Assert-ContainedPath `
@@ -1613,10 +2573,15 @@ function Test-InstalledRecoveryController {
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$ControllerRoot,
     [Parameter(Mandatory)][string]$ExpectedManifestSha256,
-    [Parameter(Mandatory)][string]$IdentitySid
+    [Parameter(Mandatory)][string]$IdentitySid,
+    [string]$ExpectedControllerVersion = $script:CanonicalControllerVersion
   )
 
-  $receipt = Test-RecoveryControllerManifest -Layout $Layout -SourceRoot $ControllerRoot
+  [void](Assert-SupportedControllerVersion -ControllerVersion $ExpectedControllerVersion)
+  $receipt = Test-RecoveryControllerManifest `
+    -Layout $Layout `
+    -SourceRoot $ControllerRoot `
+    -ExpectedControllerVersion $ExpectedControllerVersion
   $expectedRoot = Get-RecoveryControllerRoot `
     -Layout $Layout `
     -ControllerVersion ([string]$receipt.controllerVersion) `
@@ -1662,11 +2627,11 @@ function Assert-RecoveryControllerInstallationValue {
   if (@($State.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
       @($requiredKeys | Where-Object { $_ -notin $State.Keys }).Count -ne 0 -or
       [int]$State.schemaVersion -ne 1 -or
-      [string]$State.controllerVersion -cne $script:CanonicalControllerVersion -or
       [string]$State.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
       [string]$State.identitySid -cnotmatch "^S-1-[0-9-]+$") {
     throw "Recovery controller installation state does not match the pinned contract."
   }
+  [void](Assert-SupportedControllerVersion -ControllerVersion ([string]$State.controllerVersion))
   [void](Assert-UtcTimestamp -Value ([string]$State.installedAtUtc) -Context "Recovery controller installedAtUtc")
   $currentIdentity = Get-CurrentWindowsIdentityReceipt
   if ([string]$State.identitySid -cne [string]$currentIdentity.identitySid) {
@@ -1676,7 +2641,8 @@ function Assert-RecoveryControllerInstallationValue {
       -Layout $Layout `
       -ControllerRoot ([string]$State.controllerRoot) `
       -ExpectedManifestSha256 ([string]$State.controllerManifestSha256) `
-      -IdentitySid ([string]$State.identitySid))
+      -IdentitySid ([string]$State.identitySid) `
+      -ExpectedControllerVersion ([string]$State.controllerVersion))
   return $State
 }
 
@@ -1700,18 +2666,19 @@ function Assert-LastKnownGoodRecoveryControllerValue {
   if (@($Pointer.Keys | Where-Object { $_ -notin $requiredKeys }).Count -ne 0 -or
       @($requiredKeys | Where-Object { $_ -notin $Pointer.Keys }).Count -ne 0 -or
       [int]$Pointer.schemaVersion -ne 1 -or
-      [string]$Pointer.controllerVersion -cne $script:CanonicalControllerVersion -or
       [string]$Pointer.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
       [string]$Pointer.qualifiedReleaseSha -cnotmatch $script:ShaPattern) {
     throw "Last-known-good recovery controller pointer is invalid."
   }
+  [void](Assert-SupportedControllerVersion -ControllerVersion ([string]$Pointer.controllerVersion))
   [void](Assert-UtcTimestamp -Value ([string]$Pointer.qualifiedAtUtc) -Context "Recovery controller qualifiedAtUtc")
   $identity = Get-CurrentWindowsIdentityReceipt
   [void](Test-InstalledRecoveryController `
       -Layout $Layout `
       -ControllerRoot ([string]$Pointer.controllerRoot) `
       -ExpectedManifestSha256 ([string]$Pointer.controllerManifestSha256) `
-      -IdentitySid ([string]$identity.identitySid))
+      -IdentitySid ([string]$identity.identitySid) `
+      -ExpectedControllerVersion ([string]$Pointer.controllerVersion))
   return $Pointer
 }
 
@@ -1737,16 +2704,11 @@ function Set-LastKnownGoodRecoveryController {
     throw "Recovery controller can be qualified only for the active release."
   }
   $releaseRoot = Get-ReleaseRoot -Layout $Layout -CommitSha $QualifiedReleaseSha
-  [void](Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $releaseRoot -ExpectedSha $QualifiedReleaseSha)
-  $runtimeReceipt = Test-RuntimeDependencyIntegrity `
+  [void](Test-SealedRuntimeDependencyAttestation `
     -Layout $Layout `
     -ReleaseRoot $releaseRoot `
     -ExpectedSha $QualifiedReleaseSha `
-    -ExpectedReceiptSha256 ([string]$current.runtimeDependencyReceiptSha256)
-  [void](Assert-ReleaseDirectoryProtection `
-      -Layout $Layout `
-      -ReleaseRoot $releaseRoot `
-      -IdentitySid ([string]$runtimeReceipt.identitySid))
+    -ExpectedReceiptSha256 ([string]$current.runtimeDependencyReceiptSha256))
   [void](Assert-DeploymentTaskRegistration -RepositoryRoot $RepositoryRoot -TaskName $TaskName)
   if ($null -eq (Get-LiveReleaseProcess -Layout $Layout -ExpectedSha $QualifiedReleaseSha)) {
     throw "Recovery controller cannot be qualified without the exact live release process."
@@ -2035,19 +2997,11 @@ function Recover-InterruptedDeploymentActivation {
   if ([bool]$currentEntry.present) {
     $priorCurrent = Read-ReleasePointer -Path (Join-Path $backup.backupRoot "current.json")
     $priorReleaseRoot = Get-ReleaseRoot -Layout $Layout -CommitSha ([string]$priorCurrent.commitSha)
-    [void](Test-ReleaseDirectory `
-        -Layout $Layout `
-        -ReleaseRoot $priorReleaseRoot `
-        -ExpectedSha ([string]$priorCurrent.commitSha))
-    $priorRuntimeReceipt = Test-RuntimeDependencyIntegrity `
+    [void](Test-SealedRuntimeDependencyAttestation `
       -Layout $Layout `
       -ReleaseRoot $priorReleaseRoot `
       -ExpectedSha ([string]$priorCurrent.commitSha) `
-      -ExpectedReceiptSha256 ([string]$priorCurrent.runtimeDependencyReceiptSha256)
-    [void](Assert-ReleaseDirectoryProtection `
-        -Layout $Layout `
-        -ReleaseRoot $priorReleaseRoot `
-        -IdentitySid ([string]$priorRuntimeReceipt.identitySid))
+      -ExpectedReceiptSha256 ([string]$priorCurrent.runtimeDependencyReceiptSha256))
   }
   if ([bool]$backup.manifest.entries["previous.json"].present) {
     [void](Read-ReleasePointer -Path (Join-Path $backup.backupRoot "previous.json"))
@@ -2196,24 +3150,57 @@ function Move-InterruptedReleasePathToFailed {
   param(
     [Parameter(Mandatory)][hashtable]$Layout,
     [Parameter(Mandatory)][string]$SourceRoot,
-    [Parameter(Mandatory)][string]$AllowedRoot,
-    [Parameter(Mandatory)][string]$Name
+    [Parameter(Mandatory)][string]$CommitSha,
+    [Parameter(Mandatory)][string]$OperationId,
+    [Parameter(Mandatory)][ValidateSet("release", "staging")][string]$Kind
   )
 
+  [void](Assert-CommitSha -CommitSha $CommitSha)
+  if ($OperationId -cnotmatch "^[0-9TZ-]+-[0-9a-f]{12}$") {
+    throw "Interrupted release quarantine operation identity is invalid."
+  }
+  $allowedRoot = if ($Kind -ceq "release") { $Layout.Releases } else { $Layout.Staging }
+  $expectedSource = if ($Kind -ceq "release") {
+    Get-ReleaseRoot -Layout $Layout -CommitSha $CommitSha
+  } else {
+    Assert-ContainedPath `
+      -Root $Layout.Staging `
+      -Path (Join-Path $Layout.Staging "$CommitSha-$OperationId")
+  }
+  $sourceFull = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd("\")
+  if (-not [string]::Equals(
+      $sourceFull,
+      [System.IO.Path]::GetFullPath($expectedSource).TrimEnd("\"),
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Interrupted release quarantine source does not match the exact pending identity."
+  }
+  [void](Assert-ContainedPath -Root $Layout.Root -Path $allowedRoot)
+  [void](Assert-ContainedPath -Root $Layout.Root -Path $Layout.Failed)
+  [void](Assert-ContainedPath -Root $allowedRoot -Path $sourceFull)
   if (-not (Test-Path -LiteralPath $SourceRoot)) {
     return $null
   }
-  [void](Assert-ContainedPath -Root $AllowedRoot -Path $SourceRoot)
-  [void](Assert-TreeContainsNoReparsePoints -Root $SourceRoot)
-  $item = Get-Item -LiteralPath $SourceRoot -Force
-  if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Interrupted release path is a reparse point and cannot be quarantined: $SourceRoot"
+  $item = Get-Item -LiteralPath $sourceFull -Force
+  if (-not $item.PSIsContainer -or
+      ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Interrupted release root must be a non-reparse directory before quarantine: $sourceFull"
   }
-  $destination = Assert-ContainedPath -Root $Layout.Failed -Path (Join-Path $Layout.Failed $Name)
+  $name = "$CommitSha-$OperationId-$Kind"
+  $destination = Assert-ContainedPath -Root $Layout.Failed -Path (Join-Path $Layout.Failed $name)
   if (Test-Path -LiteralPath $destination) {
     throw "Interrupted release quarantine target already exists: $destination"
   }
-  Move-Item -LiteralPath $SourceRoot -Destination $destination
+  $sourceVolume = [System.IO.Path]::GetPathRoot($sourceFull).TrimEnd("\")
+  $destinationVolume = [System.IO.Path]::GetPathRoot($destination).TrimEnd("\")
+  if (-not [string]::Equals(
+      $sourceVolume,
+      $destinationVolume,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Interrupted release quarantine requires an atomic same-volume rename."
+  }
+  [System.IO.Directory]::Move($sourceFull, $destination)
   return $destination
 }
 
@@ -2235,12 +3222,10 @@ function Recover-InterruptedReleaseInstallation {
   $completed = $false
   if (Test-Path -LiteralPath $releaseRoot -PathType Container) {
     try {
-      [void](Test-ReleaseDirectory -Layout $Layout -ReleaseRoot $releaseRoot -ExpectedSha $commitSha)
-      $runtimeReceipt = Test-RuntimeDependencyIntegrity -Layout $Layout -ReleaseRoot $releaseRoot -ExpectedSha $commitSha
-      [void](Assert-ReleaseDirectoryProtection `
+      [void](Test-SealedRuntimeDependencyAttestation `
           -Layout $Layout `
           -ReleaseRoot $releaseRoot `
-          -IdentitySid ([string]$runtimeReceipt.identitySid))
+          -ExpectedSha $commitSha)
       $completed = $true
     } catch {
       $completed = $false
@@ -2251,8 +3236,9 @@ function Recover-InterruptedReleaseInstallation {
     $failedRelease = Move-InterruptedReleasePathToFailed `
       -Layout $Layout `
       -SourceRoot $releaseRoot `
-      -AllowedRoot $Layout.Releases `
-      -Name "$commitSha-$operationId-release"
+      -CommitSha $commitSha `
+      -OperationId $operationId `
+      -Kind "release"
     if ($null -ne $failedRelease) {
       $quarantined.Add($failedRelease)
     }
@@ -2275,8 +3261,9 @@ function Recover-InterruptedReleaseInstallation {
   $failedStaging = Move-InterruptedReleasePathToFailed `
     -Layout $Layout `
     -SourceRoot $stagingRoot `
-    -AllowedRoot $Layout.Staging `
-    -Name "$commitSha-$operationId-staging"
+    -CommitSha $commitSha `
+    -OperationId $operationId `
+    -Kind "staging"
   if ($null -ne $failedStaging) {
     $quarantined.Add($failedStaging)
   }
@@ -2661,11 +3648,11 @@ function Read-DeploymentTaskInstallation {
       [int]$state.schemaVersion -ne 1 -or
       [string]$state.repositoryRoot -cne $script:CanonicalRepositoryRoot -or
       [string]$state.taskName -cne $script:CanonicalTaskName -or
-      [string]$state.controllerVersion -cne $script:CanonicalControllerVersion -or
       [string]$state.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
       [string]$state.identitySid -cnotmatch "^S-1-[0-9-]+$") {
     throw "Local-production task installation state does not match the pinned contract."
   }
+  [void](Assert-SupportedControllerVersion -ControllerVersion ([string]$state.controllerVersion))
   [void](Assert-ContainedPath -Root $Layout.Controllers -Path ([string]$state.startScript))
   if (-not (Test-Path -LiteralPath ([string]$state.startScript) -PathType Leaf) -or
       -not (Test-Path -LiteralPath ([string]$state.powerShellPath) -PathType Leaf)) {

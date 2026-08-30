@@ -472,7 +472,7 @@ jobs:
           if (@($pointer.Keys | Where-Object { $_ -notin $pointerKeys }).Count -ne 0 -or
               @($pointerKeys | Where-Object { $_ -notin $pointer.Keys }).Count -ne 0 -or
               [int]$pointer.schemaVersion -ne 1 -or
-              [string]$pointer.controllerVersion -cne "1.0.0" -or
+              [string]$pointer.controllerVersion -cne "1.0.1" -or
               [string]$pointer.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$") {
             throw "Last-known-good recovery controller pointer is invalid."
           }
