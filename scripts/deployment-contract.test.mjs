@@ -7,6 +7,18 @@ async function deploymentScript(name) {
   return await readFile(resolve("scripts/deployment", name), "utf8");
 }
 
+function powershellFunction(source, name) {
+  const marker = `function ${name} {`;
+  const start = source.indexOf(marker);
+  expect(start, `${name} must be defined`).toBeGreaterThanOrEqual(0);
+  const next = source.indexOf("\nfunction ", start + marker.length);
+  return source.slice(start, next < 0 ? source.length : next);
+}
+
+function symbolCount(source, name) {
+  return source.match(new RegExp(`\\b${name}\\b`, "gu"))?.length ?? 0;
+}
+
 describe("Windows local-production deployment contract", () => {
   it("pins loopback readiness and the reviewed official runner", async () => {
     const common = await deploymentScript("Deployment.Common.ps1");
@@ -28,16 +40,14 @@ describe("Windows local-production deployment contract", () => {
     const validateArchive = deploy.indexOf("Test-ReleaseArchive");
     const moveToFinal = deploy.indexOf("Move-Item -LiteralPath $stagingRoot -Destination $releaseRoot");
     const installDependencies = deploy.indexOf("ci --omit=dev --ignore-scripts");
-    const writeRuntimeReceipt = deploy.indexOf("Write-RuntimeDependencyIntegrity");
-    const sealRelease = deploy.indexOf("Protect-ReleaseDirectory");
+    const writeRuntimeReceipt = deploy.indexOf("Write-SealedRuntimeDependencyAttestation");
     const activatePointer = deploy.indexOf("-Path $layout.Current");
     const readiness = deploy.indexOf("Wait-ForReleaseHealth");
     expect(validateArchive).toBeGreaterThan(0);
     expect(moveToFinal).toBeGreaterThan(validateArchive);
     expect(installDependencies).toBeGreaterThan(moveToFinal);
     expect(writeRuntimeReceipt).toBeGreaterThan(installDependencies);
-    expect(sealRelease).toBeGreaterThan(writeRuntimeReceipt);
-    expect(activatePointer).toBeGreaterThan(sealRelease);
+    expect(activatePointer).toBeGreaterThan(writeRuntimeReceipt);
     expect(readiness).toBeGreaterThan(activatePointer);
     const setLastKnownGood = deploy.indexOf("Set-LastKnownGoodRecoveryController");
     const localReleaseAcceptance = deploy.indexOf("Test-LocalRelease.ps1");
@@ -61,13 +71,13 @@ describe("Windows local-production deployment contract", () => {
     expect(deploy).toContain("ReleaseInstallationPending");
     expect(deploy).toContain("Recover-InterruptedReleaseInstallation");
     expect(deploy).toContain("Recover-InterruptedDeploymentActivation");
-    expect(deploy).toContain("Read-PinnedNodeRuntimeInstallation");
+    expect(deploy).toContain("Read-PinnedNodeRuntimeAttestation");
     expect(deploy).not.toContain('Get-StableExecutable -Name "node.exe"');
   });
 
   it("binds the launched API and web bundle to one release SHA", async () => {
     const start = await deploymentScript("Start-LocalRelease.ps1");
-    const verifyRuntime = start.indexOf("Test-RuntimeDependencyIntegrity");
+    const verifyRuntime = start.indexOf("Test-SealedRuntimeDependencyAttestation");
     const inspectLive = start.indexOf("Get-LiveReleaseProcess");
     const startProcess = start.indexOf("Start-Process");
     expect(verifyRuntime).toBeGreaterThan(0);
@@ -79,6 +89,8 @@ describe("Windows local-production deployment contract", () => {
     expect(start).toContain("-WindowStyle Hidden");
     expect(start).toContain("Write-AtomicJson -Layout $layout -Path $layout.Process");
     expect(start).toContain("runtimeDependencyReceiptSha256");
+    expect(start).not.toContain("Test-RuntimeDependencyIntegrityFullAudit");
+    expect(start).not.toContain("Assert-ReleaseDirectoryProtection");
   });
 
   it("binds immutable dashboard inputs to the selected release payload", async () => {
@@ -94,20 +106,238 @@ describe("Windows local-production deployment contract", () => {
     );
   });
 
-  it("hashes the complete dependency tree and binds it to an external immutable seal", async () => {
+  it("seals the canonical installed dependency graph before activation without a per-file tree scan", async () => {
     const common = await deploymentScript("Deployment.Common.ps1");
-    expect(common).toContain('kind = "directory"');
-    expect(common).toContain('kind = "link"');
-    expect(common).toContain('kind = "file"');
-    expect(common).toContain("nodeSha256");
-    expect(common).toContain("nodeRuntimeArchiveSha256");
-    expect(common).toContain("nodeRuntimeTreeSha256");
-    expect(common).toContain("runtimeIntegritySha256");
-    expect(common).toContain("Get-ChildItem -LiteralPath $releaseRootFull -Recurse -Force");
-    expect(common).toContain("Assert-IntegritySealProtection");
-    expect(common).toContain("Assert-ReleaseDirectoryProtection");
-    expect(common).toContain('npmVersion -cne "10.9.8"');
-    expect(common).not.toContain('(& ([string]$receipt.npmPath) --version');
+    const deploy = await deploymentScript("Deploy-LocalRelease.ps1");
+    const writer = powershellFunction(common, "Write-SealedRuntimeDependencyAttestation");
+    const graph = powershellFunction(common, "Get-PinnedNpmDependencyGraphReceipt");
+    const canonicalGraph = powershellFunction(common, "Get-CanonicalNpmDependencyGraphReceipt");
+    expect(symbolCount(deploy, "Write-SealedRuntimeDependencyAttestation")).toBe(1);
+    expect(deploy).not.toMatch(/\bWrite-RuntimeDependencyIntegrity\b/u);
+    expect(deploy).not.toContain("Get-RuntimeDependencyTreeReceipt");
+    expect(deploy).not.toContain("Test-RuntimeDependencyIntegrityFullAudit");
+    expect(writer).not.toContain("Get-RuntimeDependencyTreeReceipt");
+    expect(graph).toContain("Invoke-BoundedProcess");
+    expect(graph).toContain("RuntimeAttestationGraphTimeoutSeconds");
+    for (const npmGraphArgument of ['"ls"', '"--omit=dev"', '"--all"', '"--json"']) {
+      expect(graph).toContain(npmGraphArgument);
+    }
+    for (const graphBinding of [
+      "attestationKind = $script:RuntimeAttestationKind",
+      "dependencyGraphSha256",
+      "dependencyGraphNodeCount",
+      "hiddenPackageLockSha256",
+      "packageLockSha256",
+      "releaseManifestSha256",
+      "criticalPayloadSha256",
+      "npmVersion",
+      "npmSha256"
+    ]) {
+      expect(writer).toContain(graphBinding);
+    }
+    expect(writer).toContain("schemaVersion = 4");
+    expect(writer).toContain("schemaVersion = 2");
+    expect(writer).toContain("runtimeIntegritySha256 = $receiptSha256");
+    expect(writer).toContain("dependencyGraphSha256 = [string]$graph.dependencyGraphSha256");
+    expect(writer).toContain("releaseManifestSha256 = [string]$criticalPayload.releaseManifestSha256");
+    expect(common).toContain('$script:RuntimeAttestationKind = "npm-lock-graph-v1"');
+    expect(common).toContain("$script:RuntimeAttestationGraphTimeoutSeconds = 120");
+    for (const phase of ["npm-graph-start", "npm-graph-complete"]) {
+      expect(graph).toContain(phase);
+    }
+    expect(canonicalGraph).toContain("$child.Count -eq 0");
+    expect(canonicalGraph).toContain("platform-omitted optional dependencies");
+    expect(canonicalGraph).toContain("non-empty node without a version");
+    for (const phase of ["release-protection-start", "release-protection-complete", "seal-complete"]) {
+      expect(writer).toContain(phase);
+    }
+
+    const installDependencies = deploy.indexOf("ci --omit=dev --ignore-scripts");
+    const writeRuntimeReceipt = deploy.indexOf("Write-SealedRuntimeDependencyAttestation");
+    const activatePointer = deploy.indexOf("-Path $layout.Current");
+    const graphAttestation = writer.indexOf("Get-PinnedNpmDependencyGraphReceipt");
+    const writeReceipt = writer.indexOf("Write-AtomicJson -Layout $Layout -Path $receiptPath");
+    const protectRelease = writer.indexOf("Protect-ReleaseDirectory");
+    const writeSeal = writer.indexOf("Write-AtomicJson -Layout $Layout -Path $sealPath");
+    const verifySeal = writer.indexOf("Test-SealedRuntimeDependencyAttestation");
+    expect(writeRuntimeReceipt).toBeGreaterThan(installDependencies);
+    expect(activatePointer).toBeGreaterThan(writeRuntimeReceipt);
+    expect(graphAttestation).toBeGreaterThan(0);
+    expect(writeReceipt).toBeGreaterThan(graphAttestation);
+    expect(protectRelease).toBeGreaterThan(writeReceipt);
+    expect(writeSeal).toBeGreaterThan(protectRelease);
+    expect(verifySeal).toBeGreaterThan(writeSeal);
+  });
+
+  it("streams bounded child output and terminates the process tree at the limit", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const boundedProcess = powershellFunction(common, "Invoke-BoundedProcess");
+    const hardening = await deploymentScript("Test-DeploymentHardening.ps1");
+    expect(boundedProcess).toContain("ReadAsync");
+    expect(boundedProcess).toContain("combined output exceeded its reviewed bound");
+    expect(boundedProcess).toContain("$process.Kill($true)");
+    expect(boundedProcess).toContain("process tree did not exit after termination");
+    expect(boundedProcess).toContain("New-BoundedProcessJob");
+    expect(boundedProcess).toContain("$job.Terminate()");
+    expect(common).toContain("JobObjectLimitKillOnJobClose");
+    expect(common).toContain("AssignProcessToJobObject");
+    expect(hardening).toContain("boundedProcessTreeTermination = $true");
+    expect(hardening).toContain("Synthetic exited-parent process-tree fixture");
+    expect(boundedProcess).not.toContain("ReadToEndAsync");
+    expect(boundedProcess.indexOf("combined output exceeded its reviewed bound")).toBeLessThan(
+      boundedProcess.indexOf("stdout = $stdoutBuilder.ToString()")
+    );
+  });
+
+  it("keeps normal deploy, start, acceptance, and rollback on bounded sealed attestation", async () => {
+    const deploy = await deploymentScript("Deploy-LocalRelease.ps1");
+    const start = await deploymentScript("Start-LocalRelease.ps1");
+    const acceptance = await deploymentScript("Test-LocalRelease.ps1");
+    const rollback = await deploymentScript("Rollback-LocalRelease.ps1");
+
+    for (const script of [deploy, start, rollback]) {
+      expect(script).toContain("Test-SealedRuntimeDependencyAttestation");
+      expect(script).not.toContain("Test-RuntimeDependencyIntegrityFullAudit");
+      expect(script).not.toMatch(/\bTest-RuntimeDependencyIntegrity\b/u);
+      expect(script).not.toContain("Assert-ReleaseDirectoryProtection");
+      expect(script).not.toContain("Get-RuntimeDependencyTreeReceipt");
+    }
+
+    expect(acceptance).toContain("[switch]$FullAudit");
+    expect(acceptance).toContain("Test-SealedRuntimeDependencyAttestation");
+    expect(acceptance).toContain("Test-RuntimeDependencyIntegrityFullAudit");
+    expect(acceptance).toContain("runtimeAttestationMode");
+    expect(acceptance).toContain("runtimeReceipt.attestationMode");
+    const fullAuditBranch = acceptance.indexOf("if ($FullAudit)");
+    const fullAuditCall = acceptance.indexOf("Test-RuntimeDependencyIntegrityFullAudit");
+    const sealedCall = acceptance.indexOf("Test-SealedRuntimeDependencyAttestation");
+    expect(fullAuditBranch).toBeGreaterThan(0);
+    expect(fullAuditCall).toBeGreaterThan(fullAuditBranch);
+    expect(sealedCall).toBeGreaterThan(fullAuditCall);
+  });
+
+  it("binds fast attestation to the exact sealed release and keeps a recursive offline audit", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const sealed = powershellFunction(common, "Test-SealedRuntimeDependencyAttestation");
+    const fullAudit = powershellFunction(common, "Test-RuntimeDependencyIntegrityFullAudit");
+    const compatibility = powershellFunction(common, "Test-RuntimeDependencyIntegrity");
+    const boundedAcl = powershellFunction(common, "Assert-BoundedReleaseDirectoryProtection");
+    const criticalPaths = powershellFunction(common, "Get-BoundedReleaseCriticalPaths");
+    const protectRelease = powershellFunction(common, "Protect-ReleaseDirectory");
+
+    for (const binding of [
+      "Assert-ContainedPath",
+      "Get-CriticalReleasePayloadAttestation",
+      "commitSha",
+      "packageLockSha256",
+      "releaseManifestSha256",
+      "criticalPayloadSha256",
+      "ExpectedReceiptSha256",
+      "runtimeIntegritySha256",
+      "Assert-IntegritySealProtection",
+      "Read-PinnedNodeRuntimeAttestation",
+      "nodeSha256",
+      "nodeRuntimeArchiveSha256",
+      "nodeRuntimeTreeSha256",
+      "npmVersion",
+      "npmSha256",
+      "dependencyGraphSha256",
+      "dependencyGraphNodeCount",
+      "hiddenPackageLockSha256",
+      "Get-BoundedReleaseCriticalPaths",
+      "Assert-BoundedReleaseDirectoryProtection"
+    ]) {
+      expect(sealed).toContain(binding);
+    }
+    expect(sealed).not.toContain("Get-RuntimeDependencyTreeReceipt");
+    expect(sealed).not.toContain("Assert-ReleaseDirectoryProtection");
+    expect(sealed).toContain("schemaVersion");
+    expect(sealed).toContain("attestationKind");
+    expect(sealed).toContain("releaseManifestSha256");
+    expect(sealed).toContain("legacyReceipt");
+    expect(sealed).toContain("seal.schemaVersion -ne 1");
+    expect(sealed).toContain("seal.schemaVersion -ne 2");
+    expect(boundedAcl).not.toMatch(/Get-ChildItem[^\n]*-Recurse/u);
+    expect(boundedAcl).not.toContain("-Recursive");
+    expect(boundedAcl).not.toMatch(/\/(?:T|verify)\b/iu);
+    for (const criticalPath of [
+      "release-manifest.json",
+      "runtime-integrity.json",
+      "node_modules",
+      ".package-lock.json"
+    ]) {
+      expect(criticalPaths).toContain(criticalPath);
+    }
+    for (const criticalPayload of [
+      '"package.json"',
+      '"package-lock.json"',
+      '"apps/api/package.json"',
+      '"apps/api/dist/server.js"',
+      '"apps/web/dist/index.html"'
+    ]) {
+      expect(common).toContain(criticalPayload);
+    }
+    expect(criticalPaths).toContain("256");
+    expect(criticalPaths).toContain("WorkspaceLinks.links");
+    expect(criticalPaths).toContain("linkFullPath");
+    expect(criticalPaths).toContain("targetFullPath");
+    expect(protectRelease).toContain("(OI)(CI)");
+    expect(protectRelease).toContain("Assert-BoundedReleaseDirectoryProtection");
+    expect(protectRelease).toContain("RuntimeAttestationProtectionTimeoutSeconds");
+    expect(common).toContain("$script:RuntimeAttestationProtectionTimeoutSeconds = 30");
+    expect(protectRelease).not.toMatch(/\/(?:reset|T|verify)\b/iu);
+    expect(protectRelease).not.toMatch(/Get-ChildItem[^\n]*-Recurse/u);
+
+    expect(fullAudit).toContain("Test-SealedRuntimeDependencyAttestation");
+    expect(fullAudit).toContain("Get-RuntimeDependencyTreeReceipt");
+    expect(fullAudit).toContain("Assert-ReleaseDirectoryProtection");
+    expect(fullAudit).toContain("Schema 4 full audit requires an externally trusted expected tree SHA-256");
+    expect(compatibility).toContain("ExpectedTreeSha256");
+    expect(compatibility).toContain("Test-RuntimeDependencyIntegrityFullAudit");
+    expect(await deploymentScript("Test-LocalRelease.ps1")).toContain(
+      "ExpectedFullAuditTreeSha256"
+    );
+    expect(await deploymentScript("Test-LocalRelease.ps1")).not.toContain(
+      "FullAudit requires an externally trusted"
+    );
+  });
+
+  it("quarantines interrupted installs with a same-volume non-traversing move", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const quarantine = powershellFunction(common, "Move-InterruptedReleasePathToFailed");
+    const recovery = powershellFunction(common, "Recover-InterruptedReleaseInstallation");
+
+    expect(quarantine).toContain("Assert-ContainedPath");
+    expect(quarantine).toContain("Get-ReleaseRoot -Layout $Layout -CommitSha $CommitSha");
+    expect(quarantine).toContain('"$CommitSha-$OperationId-$Kind"');
+    expect(quarantine).toContain("$Kind");
+    expect(quarantine).toContain("$expectedSource");
+    expect(quarantine).toContain("GetPathRoot");
+    expect(quarantine).toContain("[System.IO.Directory]::Move");
+    expect(quarantine).toContain("[System.IO.FileAttributes]::ReparsePoint");
+    expect(quarantine).not.toContain("Assert-TreeContainsNoReparsePoints");
+    expect(quarantine).not.toMatch(/Get-ChildItem[^\n]*-Recurse/u);
+    expect(quarantine).not.toContain("ResolveLinkTarget");
+    expect(symbolCount(recovery, "Move-InterruptedReleasePathToFailed")).toBeGreaterThanOrEqual(2);
+    expect(recovery.indexOf("Assert-ReleaseInstallationIsUnreferenced")).toBeLessThan(
+      recovery.indexOf("Move-InterruptedReleasePathToFailed")
+    );
+  });
+
+  it("starts the selected process before beginning the health wait", async () => {
+    const start = await deploymentScript("Start-LocalRelease.ps1");
+    const deploy = await deploymentScript("Deploy-LocalRelease.ps1");
+    const rollback = await deploymentScript("Rollback-LocalRelease.ps1");
+    const processLaunch = start.indexOf("Start-Process");
+    const supervisedHealth = start.indexOf("Wait-ForReleaseHealth", processLaunch);
+    expect(processLaunch).toBeGreaterThan(0);
+    expect(supervisedHealth).toBeGreaterThan(processLaunch);
+    expect(deploy.indexOf("Wait-ForReleaseHealth")).toBeGreaterThan(
+      deploy.indexOf("Start-ScheduledTask")
+    );
+    expect(rollback.indexOf("Wait-ForReleaseHealth")).toBeGreaterThan(
+      rollback.indexOf("Start-ScheduledTask")
+    );
   });
 
   it("installs and verifies the official D-backed Node runtime byte for byte", async () => {
@@ -168,11 +398,28 @@ describe("Windows local-production deployment contract", () => {
     );
     expect(rollback).toContain("Rollback must run from the installed last-known-good recovery controller");
     const installer = await deploymentScript("Install-LocalProductionTask.ps1");
+    const controllerInstaller = await deploymentScript("Install-RecoveryController.ps1");
     expect(installer).toContain("ControllerActivationPending");
     expect(installer).toContain("Restore-PendingControllerActivation");
     expect(installer).toContain("Register-ScheduledTask");
     expect(installer).toContain("Assert-CurrentReleaseOperational");
     expect(installer).toContain("Stop-ApplicationForControllerRecovery");
+    expect(common).toContain('$script:SupportedControllerVersions = @("1.0.0", $script:CanonicalControllerVersion)');
+    expect(common).toContain("Assert-SupportedControllerVersion");
+    expect(installer).toContain("hadPreviousLastKnownGoodController");
+    expect(installer).toContain("previousLastKnownGoodController");
+    expect(installer).toContain("schemaVersion = 3");
+    expect(installer).toContain("$pendingSchemaVersion -notin @(2, 3)");
+    expect(installer).toContain("$restoreLastKnownGoodSnapshot = $pendingSchemaVersion -eq 3");
+    expect(controllerInstaller).toContain("Assert-SupportedControllerVersion");
+    expect(controllerInstaller).toContain("-ExpectedControllerVersion ([string]$pending.controllerVersion)");
+    const qualifyNextController = installer.lastIndexOf("Set-LastKnownGoodRecoveryController");
+    const commitControllerActivation = installer.indexOf(
+      "Remove-Item -LiteralPath $layout.ControllerActivationPending",
+      qualifyNextController
+    );
+    expect(qualifyNextController).toBeGreaterThan(installer.indexOf("Start-ScheduledTask"));
+    expect(commitControllerActivation).toBeGreaterThan(qualifyNextController);
     expect(installer).toContain("-Force");
   });
 
@@ -199,7 +446,7 @@ describe("Windows local-production deployment contract", () => {
       "Test-LocalAiRuntime.ps1"
     ];
     expect(manifest.schemaVersion).toBe(1);
-    expect(manifest.controllerVersion).toBe("1.0.0");
+    expect(manifest.controllerVersion).toBe("1.0.1");
     expect(Object.keys(manifest.files).sort()).toEqual([...expectedFiles].sort());
     for (const name of expectedFiles) {
       const bytes = await readFile(resolve("scripts/deployment", name));
@@ -215,12 +462,26 @@ describe("Windows local-production deployment contract", () => {
     const aiAcceptance = rollback.indexOf("Test-LocalAiRuntime.ps1", releaseAcceptance);
     const removePending = rollback.indexOf("Remove-Item -LiteralPath $layout.Pending", aiAcceptance);
     const activationCommitted = rollback.indexOf("$activationCommitted = $true", removePending);
+    const transaction = rollback.indexOf("Enter-DeploymentTransactionMutex");
+    const activationRecovery = rollback.indexOf("Recover-InterruptedDeploymentActivation", transaction);
+    const installationRecovery = rollback.indexOf("Recover-InterruptedReleaseInstallation", activationRecovery);
+    const firstLockedAuthority = rollback.indexOf(
+      "$lockedRecoveryController = Read-LastKnownGoodRecoveryController",
+      transaction
+    );
+    const secondLockedAuthority = rollback.indexOf(
+      "$lockedRecoveryController = Read-LastKnownGoodRecoveryController",
+      firstLockedAuthority + 1
+    );
     expect(readiness).toBeGreaterThan(0);
     expect(setLastKnownGood).toBeGreaterThan(readiness);
     expect(releaseAcceptance).toBeGreaterThan(setLastKnownGood);
     expect(aiAcceptance).toBeGreaterThan(releaseAcceptance);
     expect(removePending).toBeGreaterThan(aiAcceptance);
     expect(activationCommitted).toBeGreaterThan(removePending);
+    expect(firstLockedAuthority).toBeLessThan(activationRecovery);
+    expect(secondLockedAuthority).toBeGreaterThan(installationRecovery);
+    expect(rollback).toContain("authority changed while rollback waited for the deployment lock");
   });
 
   it("records recoverable runner state before task creation and startup", async () => {

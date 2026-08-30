@@ -39,6 +39,17 @@ $activationStarted = $false
 $activationCommitted = $false
 $pendingWritten = $false
 try {
+  $lockedRecoveryController = Read-LastKnownGoodRecoveryController -Layout $layout
+  if (-not [string]::Equals(
+      [System.IO.Path]::GetFullPath($PSScriptRoot),
+      [System.IO.Path]::GetFullPath([string]$lockedRecoveryController.controllerRoot),
+      [System.StringComparison]::OrdinalIgnoreCase
+    ) -or
+    [string]$lockedRecoveryController.controllerVersion -cne [string]$recoveryController.controllerVersion -or
+    [string]$lockedRecoveryController.controllerManifestSha256 -cne [string]$recoveryController.controllerManifestSha256) {
+    throw "Last-known-good recovery controller authority changed while rollback waited for the deployment lock."
+  }
+  $recoveryController = $lockedRecoveryController
   [void](Recover-InterruptedDeploymentActivation `
       -Layout $layout `
       -RepositoryRoot $RepositoryRoot `
@@ -46,6 +57,17 @@ try {
       -HealthUri $HealthUri `
       -HealthTimeoutSeconds $HealthTimeoutSeconds)
   [void](Recover-InterruptedReleaseInstallation -Layout $layout)
+  $lockedRecoveryController = Read-LastKnownGoodRecoveryController -Layout $layout
+  if (-not [string]::Equals(
+      [System.IO.Path]::GetFullPath($PSScriptRoot),
+      [System.IO.Path]::GetFullPath([string]$lockedRecoveryController.controllerRoot),
+      [System.StringComparison]::OrdinalIgnoreCase
+    ) -or
+    [string]$lockedRecoveryController.controllerVersion -cne [string]$recoveryController.controllerVersion -or
+    [string]$lockedRecoveryController.controllerManifestSha256 -cne [string]$recoveryController.controllerManifestSha256) {
+    throw "Last-known-good recovery controller authority changed while rollback waited for the deployment lock."
+  }
+  $recoveryController = $lockedRecoveryController
   Assert-NoForeignDeploymentPendingRecords -Layout $layout
   # Re-read and compare the pointer after taking the cross-session lock. The
   # workflow's earlier confirmation is useful operator context, not authority.
@@ -61,13 +83,11 @@ try {
     throw "Rollback target is identical to the current release."
   }
   $targetRoot = Get-ReleaseRoot -Layout $layout -CommitSha $targetSha
-  [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $targetRoot -ExpectedSha $targetSha)
-  $targetRuntimeReceipt = Test-RuntimeDependencyIntegrity `
+  $targetRuntimeReceipt = Test-SealedRuntimeDependencyAttestation `
     -Layout $layout `
     -ReleaseRoot $targetRoot `
     -ExpectedSha $targetSha `
     -ExpectedReceiptSha256 ([string]$previous.runtimeDependencyReceiptSha256)
-  [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $targetRoot -IdentitySid ([string]$targetRuntimeReceipt.identitySid))
   if (Test-Path -LiteralPath $layout.Pending -PathType Leaf) {
     throw "An unresolved pending deployment record exists; inspect and recover it before rollback."
   }
@@ -129,7 +149,7 @@ try {
     -TaskName $TaskName
   $releaseAcceptance = ($releaseAcceptanceOutput -join "`n") | ConvertFrom-Json -AsHashtable
   if (-not [bool]$releaseAcceptance.accepted -or [string]$releaseAcceptance.commitSha -cne $targetSha) {
-    throw "Full rollback release acceptance did not attest the target exact SHA."
+    throw "Rollback release acceptance did not attest the target exact SHA."
   }
   $aiAcceptanceOutput = & (Join-Path $PSScriptRoot "Test-LocalAiRuntime.ps1") `
     -RepositoryRoot $RepositoryRoot `

@@ -6,8 +6,10 @@ param(
   [string]$ExpectedSha,
   [string]$HealthUri = "http://127.0.0.1:8790/api/ready",
   [switch]$RequireRepositoryHeadMatch,
+  [switch]$FullAudit,
+  [string]$ExpectedFullAuditTreeSha256,
   [ValidateRange(1, 300)][int]$HealthTimeoutSeconds = 180,
-  [ValidateRange(1, 600)][int]$IntegrityTimeoutSeconds = 180,
+  [ValidateRange(1, 7200)][int]$IntegrityTimeoutSeconds = 180,
   [string]$TaskName = "UnifiedAIOrchestrator-Local"
 )
 
@@ -33,20 +35,24 @@ if ($RequireRepositoryHeadMatch) {
 }
 
 $releaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha $ExpectedSha
-$manifest = Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $ExpectedSha
 $runtimeTimer = [System.Diagnostics.Stopwatch]::StartNew()
-$runtimeReceipt = Test-RuntimeDependencyIntegrity `
-  -Layout $layout `
-  -ReleaseRoot $releaseRoot `
-  -ExpectedSha $ExpectedSha `
-  -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256)
+$runtimeReceipt = if ($FullAudit) {
+  Test-RuntimeDependencyIntegrityFullAudit `
+    -Layout $layout `
+    -ReleaseRoot $releaseRoot `
+    -ExpectedSha $ExpectedSha `
+    -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256) `
+    -ExpectedTreeSha256 $ExpectedFullAuditTreeSha256
+} else {
+  Test-SealedRuntimeDependencyAttestation `
+    -Layout $layout `
+    -ReleaseRoot $releaseRoot `
+    -ExpectedSha $ExpectedSha `
+    -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256)
+}
 $runtimeTimer.Stop()
-$aclTimer = [System.Diagnostics.Stopwatch]::StartNew()
-[void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
-$aclTimer.Stop()
-if ($runtimeTimer.Elapsed.TotalSeconds -gt $IntegrityTimeoutSeconds -or
-    $aclTimer.Elapsed.TotalSeconds -gt $IntegrityTimeoutSeconds) {
-  throw "Release integrity or recursive ACL qualification exceeded the $IntegrityTimeoutSeconds-second production budget."
+if ($runtimeTimer.Elapsed.TotalSeconds -gt $IntegrityTimeoutSeconds) {
+  throw "Release attestation exceeded the $IntegrityTimeoutSeconds-second qualification budget."
 }
 $live = Get-LiveReleaseProcess -Layout $layout -ExpectedSha $ExpectedSha
 if ($null -eq $live) {
@@ -74,12 +80,28 @@ $result = [ordered]@{
   healthUri = $HealthUri
   readinessUri = $script:CanonicalReadyUri
   webIndexSha256 = $webIndexSha256
-  packageLockSha256 = [string]$manifest.packageLockSha256
-  runtimeTreeSha256 = [string]$runtimeReceipt.treeSha256
-  runtimeFileCount = [int]$runtimeReceipt.fileCount
-  runtimeLinkCount = [int]$runtimeReceipt.linkCount
-  runtimeIntegrityMilliseconds = [int64]$runtimeTimer.ElapsedMilliseconds
-  recursiveAclVerificationMilliseconds = [int64]$aclTimer.ElapsedMilliseconds
+  packageLockSha256 = [string]$runtimeReceipt.packageLockSha256
+  runtimeAttestationKind = [string]$runtimeReceipt.attestationKind
+  runtimeAttestationMode = [string]$runtimeReceipt.attestationMode
+  runtimeAttestationMilliseconds = [int64]$runtimeTimer.ElapsedMilliseconds
+  runtimeCriticalPathCount = [int]$runtimeReceipt.criticalPathCount
+  dependencyGraphSha256 = if ($runtimeReceipt.Contains("dependencyGraphSha256")) {
+    [string]$runtimeReceipt.dependencyGraphSha256
+  } else { $null }
+  dependencyGraphNodeCount = if ($runtimeReceipt.Contains("dependencyGraphNodeCount")) {
+    [int]$runtimeReceipt.dependencyGraphNodeCount
+  } else { $null }
+  fullAuditTreeSha256 = if ($runtimeReceipt.Contains("fullAuditTreeSha256")) {
+    [string]$runtimeReceipt.fullAuditTreeSha256
+  } else { $null }
+  fullAuditFileCount = if ($runtimeReceipt.Contains("fullAuditFileCount")) {
+    [int]$runtimeReceipt.fullAuditFileCount
+  } else { $null }
+  runtimeLinkCount = if ($runtimeReceipt.Contains("workspaceLinkCount")) {
+    [int]$runtimeReceipt.workspaceLinkCount
+  } elseif ($runtimeReceipt.Contains("linkCount")) {
+    [int]$runtimeReceipt.linkCount
+  } else { $null }
   integrityBudgetSeconds = $IntegrityTimeoutSeconds
   releaseIdentitySid = [string]$runtimeReceipt.identitySid
   releaseAclProtected = $true

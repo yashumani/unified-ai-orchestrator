@@ -20,6 +20,39 @@ $nodeRuntimeTimer.Stop()
 $powerShellPath = Get-StableExecutable -Name "pwsh.exe"
 $expectedArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -File `"C:\reviewed\Start.ps1`""
 
+$boundedJobMarker = "uai-bounded-job-$([guid]::NewGuid().ToString('N'))"
+$boundedJobRootCommand = "Start-Process -FilePath '$powerShellPath' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30','$boundedJobMarker') -NoNewWindow | Out-Null"
+$boundedJobTimedOut = $false
+try {
+  [void](Invoke-BoundedProcess `
+      -FilePath $powerShellPath `
+      -ArgumentList @("-NoProfile", "-Command", $boundedJobRootCommand) `
+      -WorkingDirectory $RepositoryRoot `
+      -TimeoutSeconds 2 `
+      -MaxOutputCharacters 4096 `
+      -Context "Synthetic exited-parent process-tree fixture")
+} catch {
+  if ($_.Exception.Message -like "*exceeded its 2-second bound*") {
+    $boundedJobTimedOut = $true
+  } else {
+    throw
+  }
+}
+Start-Sleep -Milliseconds 500
+$boundedJobSurvivors = @(
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.ProcessId -ne $PID -and
+      [string]$_.CommandLine -like "*$boundedJobMarker*"
+    }
+)
+if (-not $boundedJobTimedOut -or $boundedJobSurvivors.Count -ne 0) {
+  foreach ($survivor in $boundedJobSurvivors) {
+    Stop-Process -Id ([int]$survivor.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+  throw "Bounded process job did not terminate an exited parent's descendant process tree."
+}
+
 function Invoke-AbandonedMutexChild {
   param([Parameter(Mandatory)][string]$MutexName)
 
@@ -606,6 +639,7 @@ try {
 
 [ordered]@{
   accepted = $true
+  boundedProcessTreeTermination = $true
   abandonedMutexRecoveries = 2
   scheduledTaskMutationsRejected = $mutations.Count
   unsafeWindowsPayloadPathsRejected = $unsafePayloadPaths.Count

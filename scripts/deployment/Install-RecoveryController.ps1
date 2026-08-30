@@ -27,12 +27,12 @@ function Read-RecoveryControllerInstallationPending {
       @($requiredKeys | Where-Object { $_ -notin $pending.Keys }).Count -ne 0 -or
       [int]$pending.schemaVersion -ne 1 -or
       [string]$pending.operationId -notmatch "^[0-9TZ-]+-[0-9a-f]{12}$" -or
-      [string]$pending.controllerVersion -cne $script:CanonicalControllerVersion -or
       [string]$pending.controllerManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
       [string]$pending.identitySid -cnotmatch "^S-1-[0-9-]+$" -or
       [string]$pending.state -cne "installing") {
     throw "Pending recovery-controller installation record is invalid."
   }
+  [void](Assert-SupportedControllerVersion -ControllerVersion ([string]$pending.controllerVersion))
   [void](Assert-UtcTimestamp -Value ([string]$pending.createdAtUtc) -Context "Pending recovery controller createdAtUtc")
   $expectedControllerRoot = Get-RecoveryControllerRoot `
     -Layout $layout `
@@ -132,7 +132,8 @@ function Recover-InterruptedRecoveryControllerInstallation {
           -Layout $layout `
           -ControllerRoot $candidateRoot `
           -ExpectedManifestSha256 ([string]$pending.controllerManifestSha256) `
-          -IdentitySid ([string]$pending.identitySid))
+          -IdentitySid ([string]$pending.identitySid) `
+          -ExpectedControllerVersion ([string]$pending.controllerVersion))
       $completed = $true
     } catch {
       $completed = $false

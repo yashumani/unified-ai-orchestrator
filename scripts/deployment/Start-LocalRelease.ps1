@@ -34,16 +34,15 @@ try {
     Write-DeploymentEvent -Layout $layout -Action "lock-recovery" -Status "info" -Message "Recovered an abandoned deployment-state mutex after revalidating deployment paths."
   }
 
+  $preLaunchTimer = [System.Diagnostics.Stopwatch]::StartNew()
   $pointer = Read-ReleasePointer -Path $layout.Current
   $commitSha = [string]$pointer.commitSha
   $releaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha $commitSha
-  [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $commitSha)
-  $runtimeReceipt = Test-RuntimeDependencyIntegrity `
+  $runtimeReceipt = Test-SealedRuntimeDependencyAttestation `
     -Layout $layout `
     -ReleaseRoot $releaseRoot `
     -ExpectedSha $commitSha `
     -ExpectedReceiptSha256 ([string]$pointer.runtimeDependencyReceiptSha256)
-  [void](Assert-ReleaseDirectoryProtection -Layout $layout -ReleaseRoot $releaseRoot -IdentitySid ([string]$runtimeReceipt.identitySid))
 
   $existing = Get-LiveReleaseProcess -Layout $layout -ExpectedSha $commitSha
   if ($null -ne $existing) {
@@ -63,6 +62,9 @@ try {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
       throw "Selected release is missing required runtime file $requiredPath."
     }
+  }
+  if ($preLaunchTimer.Elapsed.TotalSeconds -ge $HealthTimeoutSeconds) {
+    throw "Bounded sealed attestation exhausted the $HealthTimeoutSeconds-second pre-launch budget."
   }
 
   $runId = "$([DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -84,6 +86,9 @@ try {
     [Environment]::SetEnvironmentVariable($name, [string]$runtimeEnvironment[$name], "Process")
   }
   try {
+    if ($preLaunchTimer.Elapsed.TotalSeconds -ge $HealthTimeoutSeconds) {
+      throw "Supervised startup did not reach process launch inside the $HealthTimeoutSeconds-second budget."
+    }
     $child = Start-Process `
       -FilePath $nodePath `
       -ArgumentList @($entrypoint) `
@@ -92,6 +97,7 @@ try {
       -RedirectStandardError $stderrPath `
       -WindowStyle Hidden `
       -PassThru
+    $preLaunchTimer.Stop()
   } finally {
     foreach ($name in $previousEnvironment.Keys) {
       [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")

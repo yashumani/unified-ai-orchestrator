@@ -107,16 +107,11 @@ function Assert-CurrentReleaseOperational {
 
   $commitSha = [string]$Pointer.commitSha
   $releaseRoot = Get-ReleaseRoot -Layout $layout -CommitSha $commitSha
-  [void](Test-ReleaseDirectory -Layout $layout -ReleaseRoot $releaseRoot -ExpectedSha $commitSha)
-  $runtimeReceipt = Test-RuntimeDependencyIntegrity `
+  $runtimeReceipt = Test-SealedRuntimeDependencyAttestation `
     -Layout $layout `
     -ReleaseRoot $releaseRoot `
     -ExpectedSha $commitSha `
     -ExpectedReceiptSha256 ([string]$Pointer.runtimeDependencyReceiptSha256)
-  [void](Assert-ReleaseDirectoryProtection `
-      -Layout $layout `
-      -ReleaseRoot $releaseRoot `
-      -IdentitySid ([string]$runtimeReceipt.identitySid))
   [void](Wait-ForReleaseHealth `
       -HealthUri $HealthUri `
       -ExpectedSha $commitSha `
@@ -198,19 +193,34 @@ function Move-ControllerActivationRecordToFailed {
 
 function Restore-PendingControllerActivation {
   $pending = Read-JsonHashtable -Path $layout.ControllerActivationPending
-  $required = @(
+  if (-not $pending.Contains("schemaVersion")) {
+    throw "Pending controller activation record has no schema version."
+  }
+  $pendingSchemaVersion = [int]$pending.schemaVersion
+  $required = [System.Collections.Generic.List[string]]::new()
+  foreach ($name in @(
     "schemaVersion", "operationId", "hadPrevious", "previousControllerInstallation",
     "previousTaskInstallation", "nextControllerInstallation", "nextTaskInstallation",
     "currentReleaseSha", "currentRuntimeDependencyReceiptSha256", "createdAtUtc"
-  )
+  )) {
+    $required.Add($name)
+  }
+  if ($pendingSchemaVersion -eq 3) {
+    $required.Add("hadPreviousLastKnownGoodController")
+    $required.Add("previousLastKnownGoodController")
+  }
   if (@($pending.Keys | Where-Object { $_ -notin $required }).Count -ne 0 -or
       @($required | Where-Object { $_ -notin $pending.Keys }).Count -ne 0 -or
-      [int]$pending.schemaVersion -ne 2 -or
+      $pendingSchemaVersion -notin @(2, 3) -or
       [string]$pending.operationId -cnotmatch "^[0-9a-f]{32}$" -or
       $pending.hadPrevious -isnot [bool] -or
       $pending.nextControllerInstallation -isnot [System.Collections.IDictionary] -or
       $pending.nextTaskInstallation -isnot [System.Collections.IDictionary]) {
     throw "Pending controller activation record is invalid."
+  }
+  if ($pendingSchemaVersion -eq 3 -and
+      $pending.hadPreviousLastKnownGoodController -isnot [bool]) {
+    throw "Pending controller activation last-known-good snapshot flag is invalid."
   }
   [void](Assert-UtcTimestamp -Value ([string]$pending.createdAtUtc) -Context "Controller activation createdAtUtc")
   $nextController = [System.Collections.IDictionary]$pending.nextControllerInstallation
@@ -232,10 +242,29 @@ function Restore-PendingControllerActivation {
       $null -ne $pending.previousTaskInstallation) {
     throw "First controller activation cannot contain prior task snapshots."
   }
+  $previousLastKnownGoodController = $null
+  $restoreLastKnownGoodSnapshot = $pendingSchemaVersion -eq 3
+  if ($restoreLastKnownGoodSnapshot) {
+    if ([bool]$pending.hadPreviousLastKnownGoodController) {
+      if ($pending.previousLastKnownGoodController -isnot [System.Collections.IDictionary]) {
+        throw "Controller activation is missing its prior last-known-good controller snapshot."
+      }
+      $previousLastKnownGoodController = [System.Collections.IDictionary]$pending.previousLastKnownGoodController
+      [void](Assert-LastKnownGoodRecoveryControllerValue `
+          -Layout $layout `
+          -Pointer $previousLastKnownGoodController)
+    } elseif ($null -ne $pending.previousLastKnownGoodController) {
+      throw "Controller activation without a prior last-known-good controller cannot contain its snapshot."
+    }
+  }
   $currentReleaseSha = [string]$pending.currentReleaseSha
   if ([string]::IsNullOrWhiteSpace($currentReleaseSha)) {
     if (-not [string]::IsNullOrWhiteSpace([string]$pending.currentRuntimeDependencyReceiptSha256)) {
       throw "Controller activation has runtime identity without a current release."
+    }
+    if (-not $restoreLastKnownGoodSnapshot -and
+        (Test-Path -LiteralPath $layout.LastKnownGoodController -PathType Leaf)) {
+      throw "Schema 2 controller activation without a current release cannot retain last-known-good state."
     }
   } else {
     [void](Assert-CommitSha -CommitSha $currentReleaseSha)
@@ -247,6 +276,17 @@ function Restore-PendingControllerActivation {
     if ([string]$currentPointer.commitSha -cne $currentReleaseSha -or
         [string]$currentPointer.runtimeDependencyReceiptSha256 -cne [string]$pending.currentRuntimeDependencyReceiptSha256) {
       throw "Current release changed during controller activation recovery."
+    }
+    if ($null -ne $previousLastKnownGoodController -and
+        [string]$previousLastKnownGoodController.qualifiedReleaseSha -cne $currentReleaseSha) {
+      throw "Prior last-known-good controller was not qualified for the unchanged current release."
+    }
+    if (-not $restoreLastKnownGoodSnapshot -and
+        (Test-Path -LiteralPath $layout.LastKnownGoodController -PathType Leaf)) {
+      $legacyLastKnownGoodController = Read-LastKnownGoodRecoveryController -Layout $layout
+      if ([string]$legacyLastKnownGoodController.qualifiedReleaseSha -cne $currentReleaseSha) {
+        throw "Schema 2 controller activation found a last-known-good controller for another release."
+      }
     }
   }
 
@@ -271,6 +311,16 @@ function Restore-PendingControllerActivation {
       if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         Remove-Item -LiteralPath $statePath -Force
       }
+    }
+  }
+  if ($restoreLastKnownGoodSnapshot) {
+    if ($null -ne $previousLastKnownGoodController) {
+      Write-AtomicJson `
+        -Layout $layout `
+        -Path $layout.LastKnownGoodController `
+        -Value $previousLastKnownGoodController
+    } elseif (Test-Path -LiteralPath $layout.LastKnownGoodController -PathType Leaf) {
+      Remove-Item -LiteralPath $layout.LastKnownGoodController -Force
     }
   }
   if (-not [string]::IsNullOrWhiteSpace($currentReleaseSha)) {
@@ -335,6 +385,19 @@ if (Test-Path -LiteralPath $layout.Current -PathType Leaf) {
 }
 $previousControllerInstallation = $null
 $previousTaskInstallation = $null
+$previousLastKnownGoodController = if (Test-Path -LiteralPath $layout.LastKnownGoodController -PathType Leaf) {
+  Read-LastKnownGoodRecoveryController -Layout $layout
+} else {
+  $null
+}
+if ($null -eq $currentPointer -and $null -ne $previousLastKnownGoodController) {
+  throw "A last-known-good recovery controller cannot exist without a current release during controller activation."
+}
+if ($null -ne $currentPointer -and
+    $null -ne $previousLastKnownGoodController -and
+    [string]$previousLastKnownGoodController.qualifiedReleaseSha -cne [string]$currentPointer.commitSha) {
+  throw "The last-known-good recovery controller is not qualified for the current release."
+}
 if ($existing.Count -eq 1) {
   $previousControllerInstallation = Read-RecoveryControllerInstallation -Layout $layout
   $previousTaskInstallation = Read-DeploymentTaskInstallation -Layout $layout
@@ -386,7 +449,7 @@ $installation = [ordered]@{
 }
 $activationOperationId = [guid]::NewGuid().ToString("N")
 Write-AtomicJson -Layout $layout -Path $layout.ControllerActivationPending -Value ([ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     operationId = $activationOperationId
     hadPrevious = $null -ne $previousControllerInstallation
     previousControllerInstallation = $previousControllerInstallation
@@ -395,6 +458,8 @@ Write-AtomicJson -Layout $layout -Path $layout.ControllerActivationPending -Valu
     nextTaskInstallation = $installation
     currentReleaseSha = if ($null -eq $currentPointer) { $null } else { [string]$currentPointer.commitSha }
     currentRuntimeDependencyReceiptSha256 = if ($null -eq $currentPointer) { $null } else { [string]$currentPointer.runtimeDependencyReceiptSha256 }
+    hadPreviousLastKnownGoodController = $null -ne $previousLastKnownGoodController
+    previousLastKnownGoodController = $previousLastKnownGoodController
     createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
   })
 try {
@@ -412,6 +477,11 @@ try {
   if ($null -ne $currentPointer) {
     Start-ScheduledTask -TaskName $TaskName
     [void](Assert-CurrentReleaseOperational -Pointer $currentPointer)
+    [void](Set-LastKnownGoodRecoveryController `
+        -Layout $layout `
+        -RepositoryRoot $RepositoryRoot `
+        -QualifiedReleaseSha ([string]$currentPointer.commitSha) `
+        -TaskName $TaskName)
   }
   Remove-Item -LiteralPath $layout.ControllerActivationPending -Force
 } catch {
