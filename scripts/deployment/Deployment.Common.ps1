@@ -3556,7 +3556,7 @@ function Invoke-ReleaseTreeAclWorker {
     }
     $allowedLinks.Add($linkPath, $targetPath)
   }
-  if ($allowedLinks.Count -lt 1 -or $allowedLinks.Count -gt 100) {
+  if ($allowedLinks.Count -gt 100) {
     throw "Release ACL worker workspace-link count is outside its reviewed range."
   }
 
@@ -3674,7 +3674,7 @@ function Invoke-ReleaseTreeAclProtectionProcess {
     [Parameter(Mandatory)][string]$ContainmentRoot,
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$IdentitySid,
-    [Parameter(Mandatory)][object[]]$WorkspaceLinks,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$WorkspaceLinks,
     [Parameter(Mandatory)][ValidateRange(1, 1800)][int]$TimeoutSeconds
   )
 
@@ -3684,7 +3684,7 @@ function Invoke-ReleaseTreeAclProtectionProcess {
         targetRelativePath = [string]$_.targetRelativePath
       }
     })
-  $contractJson = ConvertTo-Json -InputObject $contracts -Compress -Depth 5 -AsArray
+  $contractJson = ConvertTo-Json -InputObject $contracts -Compress -Depth 5
   $contractBase64 = [Convert]::ToBase64String(
     [System.Text.Encoding]::UTF8.GetBytes($contractJson)
   )
@@ -3853,7 +3853,7 @@ function Protect-ReleaseDirectory {
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$IdentitySid,
     [Parameter(Mandatory)][string[]]$CriticalPaths,
-    [Parameter(Mandatory)][object[]]$WorkspaceLinks
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$WorkspaceLinks
   )
 
   [void](Assert-ContainedPath -Root $Layout.Releases -Path $ReleaseRoot)
