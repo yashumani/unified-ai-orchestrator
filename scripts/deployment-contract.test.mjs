@@ -200,6 +200,31 @@ describe("Windows local-production deployment contract", () => {
     expect(hardening).toContain("releaseEntrypointSchemasVerified = 4");
   });
 
+  it("times early-exit classification only after the probe process has launched", async () => {
+    const hardening = await deploymentScript("Test-DeploymentHardening.ps1");
+    const fixtureStart = hardening.indexOf("$earlyExitProbe = $null");
+    const fixtureEnd = hardening.indexOf("$installRecoveryRoot =", fixtureStart);
+    const fixture = hardening.slice(fixtureStart, fixtureEnd);
+    const timerCreated = fixture.indexOf(
+      "$earlyExitTimer = [System.Diagnostics.Stopwatch]::new()"
+    );
+    const processLaunch = fixture.indexOf("$earlyExitProbe = Start-Process");
+    const classificationTimerStart = fixture.indexOf("$earlyExitTimer.Start()");
+    const observedRequest = fixture.indexOf("Invoke-ObservedReleaseJsonRequest");
+
+    expect(fixtureStart).toBeGreaterThanOrEqual(0);
+    expect(fixtureEnd).toBeGreaterThan(fixtureStart);
+    expect(timerCreated).toBeGreaterThanOrEqual(0);
+    expect(processLaunch).toBeGreaterThan(timerCreated);
+    expect(classificationTimerStart).toBeGreaterThan(processLaunch);
+    expect(observedRequest).toBeGreaterThan(classificationTimerStart);
+    expect(fixture).not.toContain("[System.Diagnostics.Stopwatch]::StartNew()");
+    expect(fixture).toContain(
+      '$earlyExitMessage -cne "Release process exited before health succeeded with code 37."'
+    );
+    expect(fixture).toContain("$earlyExitTimer.Elapsed.TotalSeconds -ge 5");
+  });
+
   it("streams bounded child output and terminates the process tree at the limit", async () => {
     const common = await deploymentScript("Deployment.Common.ps1");
     const boundedProcess = powershellFunction(common, "Invoke-BoundedProcess");

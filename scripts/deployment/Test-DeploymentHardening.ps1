@@ -948,7 +948,7 @@ try {
 $earlyExitProbe = $null
 $hangingListener = $null
 $hangingConnection = $null
-$earlyExitTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$earlyExitTimer = [System.Diagnostics.Stopwatch]::new()
 $earlyExitRejected = $false
 $earlyExitMessage = ""
 try {
@@ -970,6 +970,7 @@ try {
     ) `
     -WindowStyle Hidden `
     -PassThru
+  $earlyExitTimer.Start()
   try {
     [void](Invoke-ObservedReleaseJsonRequest `
         -Uri "http://127.0.0.1:$hangingPort/never-responds" `
