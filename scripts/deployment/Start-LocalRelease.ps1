@@ -172,8 +172,22 @@ try {
   Write-Output "Started release $commitSha as PID $($child.Id); logs: $runLogRoot"
 
   if ($Supervised) {
-    $child.WaitForExit()
-    $exitCode = $child.ExitCode
+    try {
+      $supervision = Wait-ForSupervisedReleaseExit `
+        -ObservedProcess $child `
+        -ReadinessUri $HealthUri `
+        -ExpectedSha $commitSha
+    } catch {
+      Write-DeploymentEvent `
+        -Layout $layout `
+        -Action "liveness" `
+        -Status "failed" `
+        -CommitSha $commitSha `
+        -OperationId $runId `
+        -Message $_.Exception.Message
+      throw
+    }
+    $exitCode = [int]$supervision.exitCode
     Write-DeploymentEvent -Layout $layout -Action "process-exit" -Status "failed" -CommitSha $commitSha -OperationId $runId -Message "Node process exited with code $exitCode; scheduled-task restart policy may relaunch it."
     throw "Release process exited with code $exitCode."
   }

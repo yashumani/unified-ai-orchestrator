@@ -546,6 +546,56 @@ describe("Windows local-production deployment contract", () => {
     );
   });
 
+  it("unloads the pinned Ollama smoke model immediately after live acceptance", async () => {
+    const acceptance = await deploymentScript("Test-LocalAiRuntime.ps1");
+    expect(acceptance).toContain('keep_alive = 0');
+    expect(acceptance).not.toContain('keep_alive = "5m"');
+    expect(acceptance).toContain('model = "qwen3:4b"');
+    expect(acceptance).toContain('num_ctx = 4096');
+  });
+
+  it("terminates a supervised release after three bounded exact-SHA readiness failures", async () => {
+    const common = await deploymentScript("Deployment.Common.ps1");
+    const start = await deploymentScript("Start-LocalRelease.ps1");
+    const hardening = await deploymentScript("Test-DeploymentHardening.ps1");
+    const watchdog = powershellFunction(common, "Wait-ForSupervisedReleaseExit");
+    const termination = powershellFunction(
+      common,
+      "Stop-ObservedProcessAfterLivenessFailure"
+    );
+    const supervisedFixture = hardening.slice(
+      hardening.indexOf("function Start-SyntheticSupervisedReadinessProcess"),
+      hardening.indexOf("$naturalExitFixture =")
+    );
+
+    expect(common).toContain("$script:SupervisedProbeIntervalMilliseconds = 15000");
+    expect(common).toContain("$script:SupervisedProbeTimeoutMilliseconds = 3000");
+    expect(common).toContain("$script:SupervisedFailureThreshold = 3");
+    expect(watchdog).toContain("$ObservedProcess.WaitForExit($ProbeIntervalMilliseconds)");
+    expect(watchdog).toContain("Invoke-ObservedReleaseJsonRequest");
+    expect(watchdog).toContain("$readiness.releaseSha -ceq $ExpectedSha");
+    expect(watchdog).toContain("$consecutiveFailures = 0");
+    expect(watchdog).toContain("$consecutiveFailures++");
+    expect(watchdog).toContain("$ConsecutiveFailureThreshold");
+    expect(watchdog).toContain("Stop-ObservedProcessAfterLivenessFailure");
+    expect(watchdog).not.toContain("Stop-Process -Id $ObservedProcess.Id");
+    expect(termination).toContain("$ObservedProcess.Kill()");
+    expect(termination).toContain("catch [System.InvalidOperationException]");
+    expect(termination).not.toContain("Stop-Process -Id");
+    expect(supervisedFixture).not.toContain("Stop-Process -Id");
+    expect(supervisedFixture).toContain("Stop-ObservedProcessAfterLivenessFailure");
+    expect(supervisedFixture).toContain('1, 2, 4, 5 -contains $requestCount');
+    expect(supervisedFixture).toContain("$transientLiveness.consecutiveFailures -ne 0");
+    expect(start).toContain("Wait-ForSupervisedReleaseExit");
+    expect(start).toContain('-Action "liveness"');
+    expect(start.indexOf("Wait-ForSupervisedReleaseExit")).toBeGreaterThan(
+      start.indexOf("$startupSucceeded = $true")
+    );
+    expect(hardening).toContain("supervisedLivenessTransientFailures = $true");
+    expect(hardening).toContain("supervisedLivenessHungProcessTerminated = $true");
+    expect(hardening).toContain("supervisedLivenessNaturalExitPreserved = $true");
+  });
+
   it("installs and verifies the official D-backed Node runtime byte for byte", async () => {
     const common = await deploymentScript("Deployment.Common.ps1");
     const installer = await deploymentScript("Install-PinnedNodeRuntime.ps1");
@@ -636,7 +686,7 @@ describe("Windows local-production deployment contract", () => {
     expect(installer).toContain("Register-ScheduledTask");
     expect(installer).toContain("Assert-CurrentReleaseOperational");
     expect(installer).toContain("Stop-ApplicationForControllerRecovery");
-    expect(common).toContain('$script:SupportedControllerVersions = @("1.0.0", $script:CanonicalControllerVersion)');
+    expect(common).toContain('$script:SupportedControllerVersions = @("1.0.0", "1.0.1", $script:CanonicalControllerVersion)');
     expect(common).toContain("Assert-SupportedControllerVersion");
     expect(installer).toContain("hadPreviousLastKnownGoodController");
     expect(installer).toContain("previousLastKnownGoodController");
@@ -678,7 +728,7 @@ describe("Windows local-production deployment contract", () => {
       "Test-LocalAiRuntime.ps1"
     ];
     expect(manifest.schemaVersion).toBe(1);
-    expect(manifest.controllerVersion).toBe("1.0.1");
+    expect(manifest.controllerVersion).toBe("1.0.2");
     expect(Object.keys(manifest.files).sort()).toEqual([...expectedFiles].sort());
     for (const name of expectedFiles) {
       const bytes = await readFile(resolve("scripts/deployment", name));
