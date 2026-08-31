@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "controllerVersion": "1.0.1",
+  "controllerVersion": "1.0.2",
   "files": {
-    "Deployment.Common.ps1": "5ebc28672d3ff4b644f4936c6e8a508f59fa6d7c7b981110a5ac1fa32535b423",
-    "Start-LocalRelease.ps1": "fd0ecf1e6c8a0b26e926c77b5c468e0f078c11272fd550a84933c9309df7f271",
+    "Deployment.Common.ps1": "f025d6e163a488e16ae1d792e918136b6869ca7a8714d3a8b61db12fc637f222",
+    "Start-LocalRelease.ps1": "1a73ec33e003f03c563aef4a07b7c32fdf0b5f90fe6dab6c9c307b0ee07f0f47",
     "Stop-LocalRelease.ps1": "b07cccf07a4e085eac8059d4884063204f282e2e7d620f700ef2b08e5faec9fb",
     "Rollback-LocalRelease.ps1": "9be3425c3b3d94a6d4b8036a6ac9637a120182bec3370558afb5dd108917b9f0",
     "Test-LocalRelease.ps1": "35c888c843f7d0099a6778b9901207698de3cd2b65303e1d14b5d05d0cf973e7",
-    "Test-LocalAiRuntime.ps1": "9d22fefa6627056b933ebca79d24de9a0a822ffa8a088230eaea10fed159d329"
+    "Test-LocalAiRuntime.ps1": "086dde88882a0b1aaf4a8d4a5fe041b641a160bade58f41fedb424f9b5ce751c"
   }
 }

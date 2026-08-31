@@ -945,6 +945,171 @@ try {
   }
 }
 
+function Start-SyntheticSupervisedReadinessProcess {
+  param([Parameter(Mandatory)][ValidateSet("transient", "hung")][string]$Mode)
+
+  $expectedSha = "7" * 40
+  $portPath = Assert-ContainedPath `
+    -Root $layout.Staging `
+    -Path (Join-Path $layout.Staging "supervised-$Mode-$([guid]::NewGuid().ToString('N')).port")
+  $escapedPortPath = $portPath.Replace("'", "''")
+  $childSource = @'
+$ErrorActionPreference = "Stop"
+$mode = '__MODE__'
+$expectedSha = '__SHA__'
+$portPath = '__PORT_PATH__'
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+function Write-ReadinessResponse {
+  param(
+    [Parameter(Mandatory)][System.Net.Sockets.NetworkStream]$Stream,
+    [Parameter(Mandatory)][bool]$Ready
+  )
+  $status = if ($Ready) { "ready" } else { "starting" }
+  $evidence = if ($Ready) { "ready" } else { "pending" }
+  $body = [ordered]@{
+    status = $status
+    app = "unified-ai-orchestrator"
+    mode = "local"
+    releaseSha = $expectedSha
+    checks = [ordered]@{ evidence = $evidence }
+  } | ConvertTo-Json -Compress -Depth 4
+  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+  $headerBytes = [System.Text.Encoding]::ASCII.GetBytes(
+    "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+  )
+  $Stream.Write($headerBytes, 0, $headerBytes.Length)
+  $Stream.Write($bodyBytes, 0, $bodyBytes.Length)
+  $Stream.Flush()
+}
+try {
+  $listener.Start()
+  $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+  [System.IO.File]::WriteAllText(
+    $portPath,
+    [string]$port,
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  $requestCount = 0
+  while ($true) {
+    $client = $listener.AcceptTcpClient()
+    $requestCount++
+    try {
+      $stream = $client.GetStream()
+      $buffer = [byte[]]::new(8192)
+      [void]$stream.Read($buffer, 0, $buffer.Length)
+      if ($mode -ceq "transient" -and 1, 2, 4, 5 -contains $requestCount) {
+        Write-ReadinessResponse -Stream $stream -Ready $false
+        continue
+      }
+      if ($mode -ceq "hung" -and $requestCount -gt 1) {
+        Start-Sleep -Seconds 30
+        continue
+      }
+      Write-ReadinessResponse -Stream $stream -Ready $true
+      if ($mode -ceq "transient" -and $requestCount -eq 3) {
+        continue
+      }
+      if ($mode -ceq "transient") {
+        Start-Sleep -Milliseconds 25
+        exit 0
+      }
+    } finally {
+      $client.Dispose()
+    }
+  }
+} finally {
+  $listener.Stop()
+}
+'@
+  $childSource = $childSource.Replace("__MODE__", $Mode)
+  $childSource = $childSource.Replace("__SHA__", $expectedSha)
+  $childSource = $childSource.Replace("__PORT_PATH__", $escapedPortPath)
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($childSource))
+  $process = Start-Process `
+    -FilePath $powerShellPath `
+    -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded) `
+    -WindowStyle Hidden `
+    -PassThru
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+  while (-not (Test-Path -LiteralPath $portPath -PathType Leaf)) {
+    $process.Refresh()
+    if ($process.HasExited) {
+      [void]$process.WaitForExit()
+      throw "Synthetic supervised-readiness process exited with code $($process.ExitCode)."
+    }
+    if ([DateTimeOffset]::UtcNow -ge $deadline) {
+      [void](Stop-ObservedProcessAfterLivenessFailure -ObservedProcess $process)
+      throw "Synthetic supervised-readiness process did not publish its loopback port."
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  $port = [int](Get-Content -Raw -LiteralPath $portPath)
+  return [pscustomobject]@{
+    process = $process
+    portPath = $portPath
+    readinessUri = "http://127.0.0.1:$port/api/ready"
+    expectedSha = $expectedSha
+  }
+}
+
+$transientLivenessFixture = Start-SyntheticSupervisedReadinessProcess -Mode "transient"
+try {
+  $transientLiveness = Wait-ForSupervisedReleaseExit `
+    -ObservedProcess $transientLivenessFixture.process `
+    -ReadinessUri $transientLivenessFixture.readinessUri `
+    -ExpectedSha $transientLivenessFixture.expectedSha `
+    -ProbeIntervalMilliseconds 100 `
+    -RequestTimeoutMilliseconds 250 `
+    -ConsecutiveFailureThreshold 3
+  if ([int]$transientLiveness.exitCode -ne 0 -or
+      [int]$transientLiveness.maximumConsecutiveFailures -ne 2 -or
+      [int]$transientLiveness.consecutiveFailures -ne 0) {
+    $transientReceipt = $transientLiveness | ConvertTo-Json -Compress -Depth 4
+    throw "Supervised liveness did not reset after two bounded failure pairs: $transientReceipt"
+  }
+} finally {
+  [void](Stop-ObservedProcessAfterLivenessFailure `
+      -ObservedProcess $transientLivenessFixture.process)
+  Remove-Item -LiteralPath $transientLivenessFixture.portPath -Force -ErrorAction SilentlyContinue
+}
+
+$hungLivenessFixture = Start-SyntheticSupervisedReadinessProcess -Mode "hung"
+$hungLivenessRejected = $false
+$hungLivenessMessage = ""
+try {
+  [void](Wait-ForSupervisedReleaseExit `
+      -ObservedProcess $hungLivenessFixture.process `
+      -ReadinessUri $hungLivenessFixture.readinessUri `
+      -ExpectedSha $hungLivenessFixture.expectedSha `
+      -ProbeIntervalMilliseconds 100 `
+      -RequestTimeoutMilliseconds 250 `
+      -ConsecutiveFailureThreshold 3)
+} catch {
+  $hungLivenessRejected = $true
+  $hungLivenessMessage = $_.Exception.Message
+} finally {
+  [void](Stop-ObservedProcessAfterLivenessFailure `
+      -ObservedProcess $hungLivenessFixture.process)
+  Remove-Item -LiteralPath $hungLivenessFixture.portPath -Force -ErrorAction SilentlyContinue
+}
+if (-not $hungLivenessRejected -or
+    $hungLivenessMessage -notlike "*failed 3 consecutive readiness probes; exact process*was terminated*" -or
+    -not $hungLivenessFixture.process.HasExited) {
+  throw "Supervised liveness did not terminate a listening-but-unresponsive process: $hungLivenessMessage"
+}
+
+$naturalExitFixture = Start-Process `
+  -FilePath $powerShellPath `
+  -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 29") `
+  -WindowStyle Hidden `
+  -PassThru
+[void]$naturalExitFixture.WaitForExit(10000)
+$naturalExitTermination = Stop-ObservedProcessAfterLivenessFailure `
+  -ObservedProcess $naturalExitFixture
+if ($naturalExitTermination -or $naturalExitFixture.ExitCode -ne 29) {
+  throw "Supervised liveness did not preserve an observed natural process exit."
+}
+
 $earlyExitProbe = $null
 $hangingListener = $null
 $hangingConnection = $null
@@ -1188,5 +1353,8 @@ try {
   earlyExitHangingEndpoint = $true
   earlyExitProcessCode = 37
   earlyExitDetectionMilliseconds = [int64]$earlyExitTimer.ElapsedMilliseconds
+  supervisedLivenessTransientFailures = $true
+  supervisedLivenessHungProcessTerminated = $true
+  supervisedLivenessNaturalExitPreserved = $true
   releaseInstallationRecoveryFaultsRejected = 4
 } | ConvertTo-Json -Depth 10

@@ -91,7 +91,7 @@ try {
     -Body ([ordered]@{
         model = "qwen3:4b"
         stream = $false
-        keep_alive = "5m"
+        keep_alive = 0
         messages = @([ordered]@{
             role = "user"
             content = "Reply with one short word confirming readiness."

@@ -17,12 +17,15 @@ $script:CanonicalRepositoryRoot = "D:\Yashu-AI-Workspace\unified-ai-orchestrator
 $script:CanonicalHealthUri = "http://127.0.0.1:8790/api/ready"
 $script:CanonicalLivenessUri = "http://127.0.0.1:8790/api/health"
 $script:CanonicalReadyUri = $script:CanonicalHealthUri
+$script:SupervisedProbeIntervalMilliseconds = 15000
+$script:SupervisedProbeTimeoutMilliseconds = 3000
+$script:SupervisedFailureThreshold = 3
 $script:CanonicalTaskName = "UnifiedAIOrchestrator-Local"
 $script:CanonicalRunnerTaskName = "UnifiedAIOrchestrator-GitHubRunner"
 $script:CanonicalRunnerRepositoryUrl = "https://github.com/yashumani/unified-ai-orchestrator"
 $script:CanonicalIcaclsPath = "C:\Windows\System32\icacls.exe"
-$script:CanonicalControllerVersion = "1.0.1"
-$script:SupportedControllerVersions = @("1.0.0", $script:CanonicalControllerVersion)
+$script:CanonicalControllerVersion = "1.0.2"
+$script:SupportedControllerVersions = @("1.0.0", "1.0.1", $script:CanonicalControllerVersion)
 $script:CanonicalDeploymentTaskDescription = "Supervises the loopback-only Unified AI Orchestrator release selected by the repository deployment pointer."
 $script:CanonicalRunnerTaskDescription = "Pinned repository-scoped GitHub Actions runner for Unified AI Orchestrator local production."
 $script:PinnedRunnerVersion = "2.337.0"
@@ -5166,6 +5169,104 @@ function Wait-ForReleaseHealth {
     Start-Sleep -Milliseconds 750
   } while ([DateTimeOffset]::UtcNow -lt $deadline)
   throw "Release health check failed: $lastError"
+}
+
+function Stop-ObservedProcessAfterLivenessFailure {
+  param([Parameter(Mandatory)][System.Diagnostics.Process]$ObservedProcess)
+
+  $ObservedProcess.Refresh()
+  if ($ObservedProcess.HasExited) {
+    [void]$ObservedProcess.WaitForExit()
+    return $false
+  }
+  try {
+    $ObservedProcess.Kill()
+  } catch [System.InvalidOperationException] {
+    $ObservedProcess.Refresh()
+    if ($ObservedProcess.HasExited) {
+      [void]$ObservedProcess.WaitForExit()
+      return $false
+    }
+    throw
+  }
+  if (-not $ObservedProcess.WaitForExit(10000)) {
+    throw "Exact supervised release process $($ObservedProcess.Id) did not terminate after its liveness failure."
+  }
+  return $true
+}
+
+function Wait-ForSupervisedReleaseExit {
+  param(
+    [Parameter(Mandatory)][System.Diagnostics.Process]$ObservedProcess,
+    [Parameter(Mandatory)][string]$ReadinessUri,
+    [Parameter(Mandatory)][string]$ExpectedSha,
+    [ValidateRange(100, 60000)][int]$ProbeIntervalMilliseconds = $script:SupervisedProbeIntervalMilliseconds,
+    [ValidateRange(100, 5000)][int]$RequestTimeoutMilliseconds = $script:SupervisedProbeTimeoutMilliseconds,
+    [ValidateRange(2, 10)][int]$ConsecutiveFailureThreshold = $script:SupervisedFailureThreshold
+  )
+
+  [void](Assert-CommitSha -CommitSha $ExpectedSha)
+  $consecutiveFailures = 0
+  $maximumConsecutiveFailures = 0
+  $lastFailure = "readiness endpoint did not respond"
+  while ($true) {
+    if ($ObservedProcess.WaitForExit($ProbeIntervalMilliseconds)) {
+      [void]$ObservedProcess.WaitForExit()
+      return [ordered]@{
+        exitCode = [int]$ObservedProcess.ExitCode
+        consecutiveFailures = $consecutiveFailures
+        maximumConsecutiveFailures = $maximumConsecutiveFailures
+      }
+    }
+
+    try {
+      $readiness = Invoke-ObservedReleaseJsonRequest `
+        -Uri $ReadinessUri `
+        -ObservedProcess $ObservedProcess `
+        -RequestTimeoutMilliseconds $RequestTimeoutMilliseconds
+      if (
+        [string]$readiness.status -cne "ready" -or
+        [string]$readiness.app -cne "unified-ai-orchestrator" -or
+        [string]$readiness.mode -cne "local" -or
+        -not ([string]$readiness.releaseSha -ceq $ExpectedSha) -or
+        [string]$readiness.checks.evidence -cne "ready"
+      ) {
+        throw "Readiness response did not attest the selected release SHA."
+      }
+      $consecutiveFailures = 0
+      $lastFailure = ""
+    } catch {
+      $ObservedProcess.Refresh()
+      if ($ObservedProcess.HasExited) {
+        [void]$ObservedProcess.WaitForExit()
+        return [ordered]@{
+          exitCode = [int]$ObservedProcess.ExitCode
+          consecutiveFailures = $consecutiveFailures
+          maximumConsecutiveFailures = $maximumConsecutiveFailures
+        }
+      }
+      $consecutiveFailures++
+      $maximumConsecutiveFailures = [Math]::Max(
+        $maximumConsecutiveFailures,
+        $consecutiveFailures
+      )
+      $lastFailure = $_.Exception.Message
+      if ($consecutiveFailures -lt $ConsecutiveFailureThreshold) {
+        continue
+      }
+
+      $terminatedForLiveness = Stop-ObservedProcessAfterLivenessFailure `
+        -ObservedProcess $ObservedProcess
+      if (-not $terminatedForLiveness) {
+        return [ordered]@{
+          exitCode = [int]$ObservedProcess.ExitCode
+          consecutiveFailures = $consecutiveFailures
+          maximumConsecutiveFailures = $maximumConsecutiveFailures
+        }
+      }
+      throw "Supervised release failed $ConsecutiveFailureThreshold consecutive readiness probes; exact process $($ObservedProcess.Id) was terminated. Last failure: $lastFailure"
+    }
+  }
 }
 
 function ConvertTo-WindowsSid {
