@@ -586,6 +586,9 @@ describe("Windows local-production deployment contract", () => {
     expect(supervisedFixture).toContain("Stop-ObservedProcessAfterLivenessFailure");
     expect(supervisedFixture).toContain('1, 2, 4, 5 -contains $requestCount');
     expect(supervisedFixture).toContain("$transientLiveness.consecutiveFailures -ne 0");
+    expect(supervisedFixture).toContain(
+      "-RequestTimeoutMilliseconds $script:SupervisedProbeTimeoutMilliseconds"
+    );
     expect(start).toContain("Wait-ForSupervisedReleaseExit");
     expect(start).toContain('-Action "liveness"');
     expect(start.indexOf("Wait-ForSupervisedReleaseExit")).toBeGreaterThan(
