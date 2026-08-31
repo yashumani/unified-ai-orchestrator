@@ -1059,7 +1059,7 @@ try {
     -ReadinessUri $transientLivenessFixture.readinessUri `
     -ExpectedSha $transientLivenessFixture.expectedSha `
     -ProbeIntervalMilliseconds 100 `
-    -RequestTimeoutMilliseconds 250 `
+    -RequestTimeoutMilliseconds $script:SupervisedProbeTimeoutMilliseconds `
     -ConsecutiveFailureThreshold 3
   if ([int]$transientLiveness.exitCode -ne 0 -or
       [int]$transientLiveness.maximumConsecutiveFailures -ne 2 -or
